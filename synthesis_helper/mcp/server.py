@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.types import Image
 
 from synthesis_helper.models import Chemical
 from synthesis_helper.pathways import enumerate_pathways
@@ -17,6 +18,7 @@ from synthesis_helper.mcp.serializers import (
     pathway_to_dto,
     reaction_to_dto,
 )
+from synthesis_helper.mcp.visualize import render_cascade_png, render_pathway_png
 
 
 mcp = FastMCP("synthesis-helper")
@@ -181,6 +183,57 @@ def describe_pathway(
         ec = f"EC {rxn.ecnum}" if rxn.ecnum else f"rxn #{rxn.id}"
         lines.append(f"{step}. {subs} → {prods}  *({ec})*")
     return "\n".join(lines)
+
+
+@mcp.tool()
+def visualize_pathway(
+    chemical_ref: str | int,
+    pathway_index: int = 0,
+    max_producers_per_chemical: int = 5,
+) -> Image:
+    """Render one pathway to a PNG for inline display in Claude Desktop.
+
+    Bipartite layered diagram: chemicals (ellipses, green=native, salmon=target)
+    and reactions (yellow boxes), laid out top-down with `dot`. Requires the
+    `graphviz` Python package + system binary (brew/apt install graphviz).
+    """
+    hg = state.get_hypergraph()
+    chem = _resolve_or_raise(chemical_ref)
+    if chem not in hg.chemical_to_shell:
+        raise ValueError(
+            f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
+        )
+    cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
+    pathways = enumerate_pathways(cascade, hg, max_pathways=pathway_index + 1)
+    if pathway_index >= len(pathways):
+        raise ValueError(
+            f"Only {len(pathways)} pathway(s) found; index {pathway_index} out of range."
+        )
+    png = render_pathway_png(pathways[pathway_index], hg)
+    return Image(data=png, format="png")
+
+
+@mcp.tool()
+def visualize_cascade(
+    chemical_ref: str | int,
+    max_producers_per_chemical: int = 5,
+    max_reactions: int = 80,
+) -> Image:
+    """Render the full cascade (all producer reactions) as a PNG.
+
+    Same visual scheme as `visualize_pathway`. Raises if the cascade has more
+    than *max_reactions* reactions — large cascades produce illegible images;
+    lower *max_producers_per_chemical* first.
+    """
+    hg = state.get_hypergraph()
+    chem = _resolve_or_raise(chemical_ref)
+    if chem not in hg.chemical_to_shell:
+        raise ValueError(
+            f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
+        )
+    cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
+    png = render_cascade_png(cascade, hg, max_reactions=max_reactions)
+    return Image(data=png, format="png")
 
 
 @mcp.tool()

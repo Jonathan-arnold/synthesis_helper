@@ -17,6 +17,16 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+**Optional — visualization tools.** `visualize_pathway` and `visualize_cascade`
+shell out to Graphviz's `dot` binary. Install it once:
+
+```bash
+brew install graphviz       # macOS
+# or: sudo apt install graphviz
+```
+
+The text tools work without Graphviz; only the two PNG tools require it.
+
 ### Register with Claude Code
 
 Project scope (this repo only):
@@ -45,6 +55,8 @@ Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: conn
 | `get_cascade(chemical_ref, max_producers_per_chemical)` | Full cascade (tree of reactions + leaf natives). |
 | `enumerate_pathways_for(chemical_ref, max_pathways, …)` | Individual linear pathways. |
 | `describe_pathway(chemical_ref, pathway_index)` | Markdown-rendered pathway. |
+| `visualize_pathway(chemical_ref, pathway_index)` | PNG diagram of one pathway (requires Graphviz). |
+| `visualize_cascade(chemical_ref, max_reactions)` | PNG diagram of full cascade tree (requires Graphviz). |
 | `resynthesize_with_fed(fed_chemical_refs)` | Re-run BFS with additional fed chemicals; returns delta. |
 
 ### Resources
@@ -65,6 +77,7 @@ Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: conn
 - “列出通往 2′-dehydrokanamycin a 的前 3 條 pathway。” → `enumerate_pathways_for` + `describe_pathway`.
 - “若我餵 PABA 進細胞，多出多少 reachable？” → `resynthesize_with_fed`.
 - “給我 target 317157 的 cascade 摘要。” → `get_cascade`.
+- “畫出 target 317157 的第一條 pathway。” → `visualize_pathway` (PNG inline).
 
 ## Run the standalone pipeline
 

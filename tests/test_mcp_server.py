@@ -9,6 +9,7 @@ plumbing.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,8 @@ from synthesis_helper.mcp.server import (
     reaction_resource,
     resynthesize_with_fed,
     stats_resource,
+    visualize_cascade,
+    visualize_pathway,
 )
 from tests.fixtures.small_cell import build_small_cell, write_small_cell_tsvs
 
@@ -114,6 +117,37 @@ def test_describe_pathway_markdown_contains_arrow():
     md = describe_pathway("T", pathway_index=0)
     assert "→" in md
     assert "Pathway 0" in md
+
+
+# --- visualization tools -----------------------------------------------------
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _skip_if_no_graphviz():
+    pytest.importorskip("graphviz")
+    if shutil.which("dot") is None:
+        pytest.skip("graphviz `dot` binary not on PATH")
+
+
+def test_visualize_pathway_returns_png():
+    _skip_if_no_graphviz()
+    img = visualize_pathway("T", pathway_index=0)
+    assert img.data[:8] == _PNG_MAGIC
+    assert len(img.data) > 500
+
+
+def test_visualize_cascade_returns_png():
+    _skip_if_no_graphviz()
+    img = visualize_cascade("T")
+    assert img.data[:8] == _PNG_MAGIC
+    assert len(img.data) > 500
+
+
+def test_visualize_cascade_raises_when_too_large():
+    _skip_if_no_graphviz()
+    with pytest.raises(ValueError, match="exceeds max_reactions"):
+        visualize_cascade("T", max_reactions=0)
 
 
 def test_resynthesize_with_fed_enables_new_chemicals():
