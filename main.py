@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from synthesis_helper.parser import parse_chemicals, parse_metabolite_list, parse_reactions
+from synthesis_helper.parser import (
+    parse_chemicals,
+    parse_metabolite_list,
+    parse_reactions,
+)
 from synthesis_helper.synthesize import synthesize
 from synthesis_helper.traceback import traceback
 from synthesis_helper.pathways import enumerate_pathways
@@ -19,7 +23,9 @@ def main() -> None:
     chemicals = parse_chemicals(DATA_DIR / "good_chems.txt")
     reactions = parse_reactions(DATA_DIR / "good_reactions.txt", chemicals)
     native = parse_metabolite_list(DATA_DIR / "minimal_metabolites.txt", chemicals)
-    universal = parse_metabolite_list(DATA_DIR / "ubiquitous_metabolites.txt", chemicals)
+    universal = parse_metabolite_list(
+        DATA_DIR / "ecoli_reachables_shell0.txt", chemicals
+    )
 
     print(f"Loaded {len(chemicals)} chemicals, {len(reactions)} reactions")
     print(f"Native metabolites: {len(native)}, Universal: {len(universal)}")
@@ -35,14 +41,16 @@ def main() -> None:
     # 4. Example: query a target chemical
     #    Uncomment and set target_id to a chemical of interest:
     #
-    # target_id = 12345
-    # if target_id in chemicals:
-    #     target = chemicals[target_id]
-    #     print(f"\nTraceback for {target.name} (shell {hg.chemical_to_shell.get(target)}):")
-    #     cascade = traceback(hg, target)
-    #     print(f"  Cascade contains {len(cascade.reactions)} reactions")
-    #     pathways = enumerate_pathways(cascade, hg)
-    #     print(f"  Found {len(pathways)} pathways")
+    target_id = 317157
+    if target_id in chemicals:
+        target = chemicals[target_id]
+        print(
+            f"\nTraceback for {target.name} (shell {hg.chemical_to_shell.get(target)}):"
+        )
+        cascade = traceback(hg, target, max_producers_per_chemical=25)
+        print(f"  Cascade contains {len(cascade.reactions)} reactions")
+        pathways = enumerate_pathways(cascade, hg)
+        print(f"  Found {len(pathways)} pathways")
 
 
 if __name__ == "__main__":

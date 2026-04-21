@@ -1,0 +1,4 @@
+gdown>=5.0
+pandas>=2.0
+rdkit>=2023.9
+pytest>=7.0
