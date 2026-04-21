@@ -17,15 +17,16 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-**Optional — visualization tools.** `visualize_pathway` and `visualize_cascade`
-shell out to Graphviz's `dot` binary. Install it once:
+**Optional — visualization tools.** `visualize_pathway`, `visualize_cascade`,
+and the two `open_*_externally` tools shell out to Graphviz's `dot` binary.
+Install it once:
 
 ```bash
 brew install graphviz       # macOS
 # or: sudo apt install graphviz
 ```
 
-The text tools work without Graphviz; only the two PNG tools require it.
+The text tools work without Graphviz; only the PNG tools require it.
 
 **Enzyme names on reaction nodes.** `data/ec_names.tsv` is shipped with a
 full EC → name table derived from [ExPASy ENZYME](https://enzyme.expasy.org/)
@@ -71,9 +72,22 @@ Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: conn
 | `get_cascade(chemical_ref, max_producers_per_chemical)` | Full cascade (tree of reactions + leaf natives). |
 | `enumerate_pathways_for(chemical_ref, max_pathways, …)` | Individual linear pathways. |
 | `describe_pathway(chemical_ref, pathway_index)` | Markdown-rendered pathway. |
-| `visualize_pathway(chemical_ref, pathway_index)` | PNG diagram of one pathway (requires Graphviz). |
-| `visualize_cascade(chemical_ref, max_reactions)` | PNG diagram of full cascade tree (requires Graphviz). |
+| `visualize_pathway(chemical_ref, pathway_index)` | PNG of one pathway, inline in the tool result (small preview). Requires Graphviz. |
+| `visualize_cascade(chemical_ref, max_reactions)` | PNG of the full cascade tree, inline in the tool result. Requires Graphviz. |
+| `open_pathway_externally(chemical_ref, pathway_index)` | Render the pathway PNG and launch the OS default image viewer (Preview.app on macOS) for a full-size, zoomable view. Requires Graphviz. |
+| `open_cascade_externally(chemical_ref, max_reactions)` | Same as above for the full cascade. Requires Graphviz. |
 | `resynthesize_with_fed(fed_chemical_refs)` | Re-run BFS with additional fed chemicals; returns delta. |
+
+#### Inline vs. external PNGs
+
+- **Inline** (`visualize_*`) returns MCP `Image` content. Claude Desktop shows
+  a small thumbnail inside the collapsed tool result — handy as a quick
+  sanity check but hard to read for anything past a few reactions.
+- **External** (`open_*_externally`) writes the PNG to the OS temp directory
+  and launches the default image viewer. On macOS that is Preview.app
+  (`⌘+` / `⌘-` to zoom, scroll to pan), on Linux `xdg-open`, on Windows
+  `start`. The tool returns the file path plus an `opened_in_viewer` flag,
+  so even when the viewer fails to launch the saved PNG is still usable.
 
 ### Resources
 
@@ -89,11 +103,12 @@ Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: conn
 
 ### Example prompts (once registered in Claude Code)
 
-- “從 native E. coli 到 vanillin 走幾步？” → `get_shell`.
-- “列出通往 2′-dehydrokanamycin a 的前 3 條 pathway。” → `enumerate_pathways_for` + `describe_pathway`.
-- “若我餵 PABA 進細胞，多出多少 reachable？” → `resynthesize_with_fed`.
-- “給我 target 317157 的 cascade 摘要。” → `get_cascade`.
-- “畫出 target 317157 的第一條 pathway。” → `visualize_pathway` (PNG inline).
+- "How many steps does it take to go from native E. coli metabolites to vanillin?" → `get_shell`.
+- "List the top 3 pathways to 2′-dehydrokanamycin a." → `enumerate_pathways_for` + `describe_pathway`.
+- "If I feed PABA into the cell, how many more chemicals become reachable?" → `resynthesize_with_fed`.
+- "Give me a cascade summary for target 317157." → `get_cascade`.
+- "Draw the first pathway to target 317157." → `visualize_pathway` (inline PNG preview).
+- "Open the first pathway to target 317157 in Preview." → `open_pathway_externally` (full-size PNG in the OS viewer).
 
 ## Run the standalone pipeline
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from synthesis_helper.mcp import server as mcp_server
 from synthesis_helper.mcp import state
 from synthesis_helper.mcp.server import (
     chemical_resource,
@@ -23,6 +24,8 @@ from synthesis_helper.mcp.server import (
     get_cascade,
     get_shell,
     list_reachables,
+    open_cascade_externally,
+    open_pathway_externally,
     reachables_resource,
     reaction_resource,
     resynthesize_with_fed,
@@ -148,6 +151,87 @@ def test_visualize_cascade_raises_when_too_large():
     _skip_if_no_graphviz()
     with pytest.raises(ValueError, match="exceeds max_reactions"):
         visualize_cascade("T", max_reactions=0)
+
+
+# --- externally-opened viewers ----------------------------------------------
+
+
+@pytest.fixture
+def mock_viewer(monkeypatch):
+    """Stub subprocess.run inside server so tests never spawn Preview.app."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001
+        calls.append(list(cmd))
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(mcp_server.subprocess, "run", fake_run)
+    return calls
+
+
+def test_open_pathway_externally_writes_png_and_launches_viewer(mock_viewer):
+    _skip_if_no_graphviz()
+    out = open_pathway_externally("T", pathway_index=0)
+    p = Path(out["path"])
+    try:
+        assert p.exists()
+        assert p.read_bytes()[:8] == _PNG_MAGIC
+        assert out["opened_in_viewer"] is True
+        assert out["chemical"] == "T"
+        assert out["steps"] >= 1
+        assert out["bytes"] > 500
+        # Viewer command was invoked with the saved path
+        assert mock_viewer, "expected subprocess.run to be called"
+        assert str(p) in mock_viewer[-1]
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_open_cascade_externally_writes_png_and_launches_viewer(mock_viewer):
+    _skip_if_no_graphviz()
+    out = open_cascade_externally("T")
+    p = Path(out["path"])
+    try:
+        assert p.exists()
+        assert p.read_bytes()[:8] == _PNG_MAGIC
+        assert out["opened_in_viewer"] is True
+        assert out["reactions"] >= 1
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_open_pathway_externally_reports_viewer_failure(monkeypatch):
+    _skip_if_no_graphviz()
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001
+        raise FileNotFoundError("no such viewer binary")
+
+    monkeypatch.setattr(mcp_server.subprocess, "run", fake_run)
+    out = open_pathway_externally("T", pathway_index=0)
+    p = Path(out["path"])
+    try:
+        # PNG should still be written even when the viewer can't launch
+        assert p.exists()
+        assert out["opened_in_viewer"] is False
+        assert out["viewer_error"]
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_open_pathway_externally_unreachable_raises(mock_viewer):
+    _skip_if_no_graphviz()
+    with pytest.raises(ValueError, match="not reachable"):
+        open_pathway_externally("M7")
+
+
+def test_open_pathway_externally_index_out_of_range_raises(mock_viewer):
+    _skip_if_no_graphviz()
+    with pytest.raises(ValueError, match="out of range"):
+        open_pathway_externally("T", pathway_index=9999)
 
 
 # --- reaction label formatting (enzyme name title + EC subtitle) ------------

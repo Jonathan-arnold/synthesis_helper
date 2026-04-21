@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -236,6 +241,121 @@ def visualize_cascade(
         cascade, hg, max_reactions=max_reactions, ec_to_name=state.get_ec_names()
     )
     return Image(data=png, format="png")
+
+
+# -----------------------------------------------------------------------------
+# Externally-opened viewers (full-size PNG in the OS image viewer)
+# -----------------------------------------------------------------------------
+
+
+_FILENAME_SAFE = re.compile(r"[^\w\-]+")
+
+
+def _slug(s: str, max_len: int = 40) -> str:
+    cleaned = _FILENAME_SAFE.sub("_", s).strip("_")[:max_len]
+    return cleaned or "x"
+
+
+def _open_in_viewer(path: Path) -> tuple[bool, str | None]:
+    """Launch the OS default app for *path*. Returns (ok, error_message)."""
+    try:
+        if sys.platform == "darwin":
+            cmd = ["open", str(path)]
+        elif sys.platform.startswith("linux"):
+            cmd = ["xdg-open", str(path)]
+        elif sys.platform == "win32":
+            cmd = ["cmd", "/c", "start", "", str(path)]
+        else:
+            return False, f"unsupported platform: {sys.platform}"
+        subprocess.run(cmd, check=True, timeout=10)
+        return True, None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return False, str(e)
+
+
+def _write_png(prefix: str, data: bytes) -> Path:
+    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".png", dir=tempfile.gettempdir())
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return Path(tmp)
+
+
+@mcp.tool()
+def open_pathway_externally(
+    chemical_ref: str | int,
+    pathway_index: int = 0,
+    max_producers_per_chemical: int = 5,
+) -> dict[str, Any]:
+    """Render a pathway PNG and open it in the OS default image viewer.
+
+    Writes the PNG to a temp file and launches the system viewer (Preview.app
+    on macOS, xdg-open on Linux, start on Windows). This gives a full-size,
+    zoomable view instead of the small inline preview embedded in tool results.
+    Returns the file path, open-status, and a short summary so the model can
+    describe what was opened.
+    """
+    hg = state.get_hypergraph()
+    chem = _resolve_or_raise(chemical_ref)
+    if chem not in hg.chemical_to_shell:
+        raise ValueError(
+            f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
+        )
+    cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
+    pathways = enumerate_pathways(cascade, hg, max_pathways=pathway_index + 1)
+    if pathway_index >= len(pathways):
+        raise ValueError(
+            f"Only {len(pathways)} pathway(s) found; index {pathway_index} out of range."
+        )
+    png = render_pathway_png(pathways[pathway_index], hg, state.get_ec_names())
+
+    path = _write_png(f"pathway_{_slug(chem.name or f'chem{chem.id}')}_{pathway_index}_", png)
+    opened, err = _open_in_viewer(path)
+    return {
+        "path": str(path),
+        "opened_in_viewer": opened,
+        "viewer_error": err,
+        "chemical": chem.name,
+        "chemical_id": chem.id,
+        "pathway_index": pathway_index,
+        "steps": len(pathways[pathway_index].reactions),
+        "bytes": len(png),
+    }
+
+
+@mcp.tool()
+def open_cascade_externally(
+    chemical_ref: str | int,
+    max_producers_per_chemical: int = 5,
+    max_reactions: int = 80,
+) -> dict[str, Any]:
+    """Render the full cascade PNG and open it in the OS default image viewer.
+
+    Same as ``open_pathway_externally`` but for the entire cascade tree. For
+    large cascades, lower ``max_producers_per_chemical`` or raise
+    ``max_reactions`` (the latter trades readability for completeness).
+    """
+    hg = state.get_hypergraph()
+    chem = _resolve_or_raise(chemical_ref)
+    if chem not in hg.chemical_to_shell:
+        raise ValueError(
+            f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
+        )
+    cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
+    png = render_cascade_png(
+        cascade, hg, max_reactions=max_reactions, ec_to_name=state.get_ec_names()
+    )
+
+    path = _write_png(f"cascade_{_slug(chem.name or f'chem{chem.id}')}_", png)
+    opened, err = _open_in_viewer(path)
+    return {
+        "path": str(path),
+        "opened_in_viewer": opened,
+        "viewer_error": err,
+        "chemical": chem.name,
+        "chemical_id": chem.id,
+        "reactions": len(cascade.reactions),
+        "bytes": len(png),
+    }
 
 
 @mcp.tool()
