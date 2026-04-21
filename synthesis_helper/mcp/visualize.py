@@ -15,7 +15,7 @@ the tool fails at call time with a clear message instead.
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from synthesis_helper.models import Cascade, Chemical, HyperGraph, Pathway, Reaction
 
@@ -38,8 +38,39 @@ def _chem_label(chem: Chemical, shell: int | None) -> str:
     return f"{name}\\n(#{chem.id}, s={shell_str})"
 
 
-def _rxn_label(rxn: Reaction) -> str:
-    return f"EC {rxn.ecnum}" if rxn.ecnum else f"rxn #{rxn.id}"
+def _html_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _rxn_label(rxn: Reaction, ec_to_name: Mapping[str, str] | None = None) -> str:
+    """Graphviz HTML-like label: bold enzyme name on top, EC as small subtitle.
+
+    Fallback when no enzyme name is known: EC number as title, rxn#id as subtitle
+    (or just rxn#id as title when the reaction has no EC either).
+    """
+    name = ec_to_name.get(rxn.ecnum, "") if (ec_to_name and rxn.ecnum) else ""
+    ec_text = f"EC {rxn.ecnum}" if rxn.ecnum else ""
+    rxn_text = f"rxn #{rxn.id}"
+
+    if name:
+        title, subtitle = name, ec_text
+    elif ec_text:
+        title, subtitle = ec_text, rxn_text
+    else:
+        title, subtitle = rxn_text, ""
+
+    title_html = f'<B><FONT POINT-SIZE="11">{_html_escape(title)}</FONT></B>'
+    if subtitle:
+        subtitle_html = (
+            f'<FONT POINT-SIZE="8" COLOR="gray35">{_html_escape(subtitle)}</FONT>'
+        )
+        return f"<{title_html}<BR/>{subtitle_html}>"
+    return f"<{title_html}>"
 
 
 def _chem_style(chem: Chemical, shell: int | None, is_target: bool) -> dict[str, str]:
@@ -91,6 +122,7 @@ def _build_digraph(
     reactions: Iterable[Reaction],
     target: Chemical,
     hg: HyperGraph,
+    ec_to_name: Mapping[str, str] | None = None,
 ):
     graphviz = _lazy_import_graphviz()
     dot = graphviz.Digraph(engine="dot")
@@ -125,7 +157,7 @@ def _build_digraph(
                 )
 
     for r in rxns_used:
-        dot.node(f"r{r.id}", _rxn_label(r), **_rxn_style())
+        dot.node(f"r{r.id}", _rxn_label(r, ec_to_name), **_rxn_style())
         for s in sorted(r.substrates, key=lambda x: x.id):
             dot.edge(f"c{s.id}", f"r{r.id}")
         for p in sorted(r.products, key=lambda x: x.id):
@@ -134,9 +166,13 @@ def _build_digraph(
     return dot
 
 
-def render_pathway_png(pathway: Pathway, hg: HyperGraph) -> bytes:
+def render_pathway_png(
+    pathway: Pathway,
+    hg: HyperGraph,
+    ec_to_name: Mapping[str, str] | None = None,
+) -> bytes:
     """Render a single Pathway to PNG bytes."""
-    dot = _build_digraph(pathway.reactions, pathway.target, hg)
+    dot = _build_digraph(pathway.reactions, pathway.target, hg, ec_to_name)
     return dot.pipe(format="png")
 
 
@@ -144,6 +180,7 @@ def render_cascade_png(
     cascade: Cascade,
     hg: HyperGraph,
     max_reactions: int = 80,
+    ec_to_name: Mapping[str, str] | None = None,
 ) -> bytes:
     """Render a Cascade (full producer tree) to PNG bytes.
 
@@ -158,5 +195,5 @@ def render_cascade_png(
             "Lower max_producers_per_chemical, or raise max_reactions "
             "if you really want a giant diagram."
         )
-    dot = _build_digraph(cascade.reactions, cascade.target, hg)
+    dot = _build_digraph(cascade.reactions, cascade.target, hg, ec_to_name)
     return dot.pipe(format="png")

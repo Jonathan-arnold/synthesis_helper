@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
-data/
+data/*
+!data/ec_names.tsv
 env/
 .venv/
 venv/
+.DS_Store
+synthesis_helper/BioE134 234 L2 Synthesis.ipynb

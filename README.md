@@ -27,6 +27,22 @@ brew install graphviz       # macOS
 
 The text tools work without Graphviz; only the two PNG tools require it.
 
+**Enzyme names on reaction nodes.** `data/ec_names.tsv` is shipped with a
+full EC → name table derived from [ExPASy ENZYME](https://enzyme.expasy.org/)
+(8k+ entries, transferred entries resolved to their new ECs). PNG diagrams
+use the enzyme name as the node title and the EC number as a small
+subtitle. To refresh the table:
+
+```bash
+curl -sS https://ftp.expasy.org/databases/enzyme/enzyme.dat -o /tmp/enzyme.dat
+.venv/bin/python scripts/build_ec_names.py /tmp/enzyme.dat
+```
+
+The `ec_names.tsv` file is distributed under the same
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) license as the
+upstream ENZYME database (© SIB Swiss Institute of Bioinformatics).
+Delete the file to fall back to EC-only labels.
+
 ### Register with Claude Code
 
 Project scope (this repo only):

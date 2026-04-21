@@ -150,6 +150,64 @@ def test_visualize_cascade_raises_when_too_large():
         visualize_cascade("T", max_reactions=0)
 
 
+# --- reaction label formatting (enzyme name title + EC subtitle) ------------
+
+
+def test_rxn_label_with_enzyme_name_has_title_and_subtitle():
+    from synthesis_helper.mcp.visualize import _rxn_label
+    from synthesis_helper.models import Reaction
+
+    rxn = Reaction(id=42, substrates=frozenset(), products=frozenset(), ecnum="1.1.1.1")
+    label = _rxn_label(rxn, {"1.1.1.1": "Alcohol dehydrogenase"})
+    assert label.startswith("<") and label.endswith(">")
+    assert "<B>" in label and "Alcohol dehydrogenase" in label
+    assert "EC 1.1.1.1" in label
+
+
+def test_rxn_label_without_enzyme_name_falls_back_to_ec_as_title():
+    from synthesis_helper.mcp.visualize import _rxn_label
+    from synthesis_helper.models import Reaction
+
+    rxn = Reaction(id=42, substrates=frozenset(), products=frozenset(), ecnum="1.1.1.1")
+    label = _rxn_label(rxn, {})
+    assert "EC 1.1.1.1" in label
+    assert "rxn #42" in label  # subtitle
+
+
+def test_rxn_label_no_ec_no_name_uses_rxn_id_only():
+    from synthesis_helper.mcp.visualize import _rxn_label
+    from synthesis_helper.models import Reaction
+
+    rxn = Reaction(id=42, substrates=frozenset(), products=frozenset())
+    label = _rxn_label(rxn, {})
+    assert "rxn #42" in label
+    assert "<BR/>" not in label  # no subtitle
+
+
+def test_rxn_label_escapes_html_special_chars_in_name():
+    from synthesis_helper.mcp.visualize import _rxn_label
+    from synthesis_helper.models import Reaction
+
+    rxn = Reaction(id=1, substrates=frozenset(), products=frozenset(), ecnum="x")
+    label = _rxn_label(rxn, {"x": "Weird & <name>"})
+    assert "&amp;" in label and "&lt;" in label and "&gt;" in label
+
+
+def test_ec_names_loaded_from_data_dir(tmp_path):
+    """state._bootstrap picks up optional ec_names.tsv."""
+    from synthesis_helper.mcp.server import _resolve_or_raise  # noqa: F401
+    sc = build_small_cell()
+    d = tmp_path / "cell_with_ec"
+    d.mkdir()
+    write_small_cell_tsvs(sc, d)
+    (d / "ec_names.tsv").write_text("ecnum\tname\n1.1.1.1\tAlcohol dehydrogenase\n")
+
+    state.reset()
+    state.configure(data_dir=d)
+    assert state.get_ec_names() == {"1.1.1.1": "Alcohol dehydrogenase"}
+    state.reset()
+
+
 def test_resynthesize_with_fed_enables_new_chemicals():
     baseline_hg = state.get_hypergraph()
     assert not any(c.name == "M6" for c in baseline_hg.chemical_to_shell)

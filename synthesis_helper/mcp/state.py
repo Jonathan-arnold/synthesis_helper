@@ -29,6 +29,7 @@ class _State:
     universals: set[Chemical] | None = None
     hypergraph: HyperGraph | None = None
     fed_hypergraphs: dict[tuple[int, ...], HyperGraph] = field(default_factory=dict)
+    ec_names: dict[str, str] | None = None
     load_time_ms: float = 0.0
 
 
@@ -54,7 +55,27 @@ def reset() -> None:
         _state.universals = None
         _state.hypergraph = None
         _state.fed_hypergraphs.clear()
+        _state.ec_names = None
         _state.load_time_ms = 0.0
+
+
+def _parse_ec_names(path: Path) -> dict[str, str]:
+    """Parse optional ec_names.tsv (columns: ecnum<TAB>name). Missing file → {}."""
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    with path.open() as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#") or line.lower().startswith("ecnum"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            ec, name = parts[0].strip(), parts[1].strip()
+            if ec and name:
+                out[ec] = name
+    return out
 
 
 def _bootstrap() -> None:
@@ -80,6 +101,7 @@ def _bootstrap() -> None:
     _state.natives = natives
     _state.universals = universals
     _state.hypergraph = hg
+    _state.ec_names = _parse_ec_names(data / "ec_names.tsv")
     _state.load_time_ms = (time.perf_counter() - t0) * 1000.0
 
 
@@ -121,6 +143,15 @@ def get_universals() -> set[Chemical]:
             _bootstrap()
         assert _state.universals is not None
         return _state.universals
+
+
+def get_ec_names() -> dict[str, str]:
+    """Return EC → enzyme-name lookup. Empty dict if data/ec_names.tsv absent."""
+    with _lock:
+        if _state.ec_names is None:
+            _bootstrap()
+        assert _state.ec_names is not None
+        return _state.ec_names
 
 
 def get_stats() -> dict[str, float | int]:

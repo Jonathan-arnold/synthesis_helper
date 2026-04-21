@@ -209,7 +209,7 @@ def visualize_pathway(
         raise ValueError(
             f"Only {len(pathways)} pathway(s) found; index {pathway_index} out of range."
         )
-    png = render_pathway_png(pathways[pathway_index], hg)
+    png = render_pathway_png(pathways[pathway_index], hg, state.get_ec_names())
     return Image(data=png, format="png")
 
 
@@ -232,7 +232,9 @@ def visualize_cascade(
             f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
         )
     cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
-    png = render_cascade_png(cascade, hg, max_reactions=max_reactions)
+    png = render_cascade_png(
+        cascade, hg, max_reactions=max_reactions, ec_to_name=state.get_ec_names()
+    )
     return Image(data=png, format="png")
 
 
