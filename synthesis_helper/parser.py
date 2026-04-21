@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 from synthesis_helper.models import Chemical, Reaction
@@ -147,7 +148,10 @@ def parse_metabolite_list(
             unmatched.append(name)
 
     if unmatched:
-        print(f"  Warning: {len(unmatched)} metabolites not matched to chemicals: "
-              f"{unmatched[:5]}{'...' if len(unmatched) > 5 else ''}")
+        print(
+            f"  Warning: {len(unmatched)} metabolites not matched to chemicals: "
+            f"{unmatched[:5]}{'...' if len(unmatched) > 5 else ''}",
+            file=sys.stderr,
+        )
 
     return metabolites
