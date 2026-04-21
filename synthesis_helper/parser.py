@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from synthesis_helper.models import Chemical, Reaction
 
 
+def _strip_proton(inchi: str) -> str:
+    """Strip the /p ionization layer only."""
+    return re.sub(r"/p[+-]\d+", "", inchi)
+
+
+def _strip_stereo(inchi: str) -> str:
+    """Strip /p plus /t /m /s stereo layers for loose matching."""
+    inchi = re.sub(r"/p[+-]\d+", "", inchi)
+    inchi = re.sub(r"/t[^/]+", "", inchi)
+    inchi = re.sub(r"/m\d+", "", inchi)
+    inchi = re.sub(r"/s\d+", "", inchi)
+    return inchi
+
+
 def _read_lines(filepath: str | Path) -> list[str]:
     """Read a file, handling both \\n and \\r line endings."""
     text = Path(filepath).read_text(errors="replace")
-    # Normalize line endings
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return [line.strip() for line in text.split("\n")]
 
@@ -75,15 +89,26 @@ def parse_metabolite_list(
     Expected format (tab-separated, with header, possibly \\r line endings):
         name  inchi  descriptor
 
-    Matches metabolites to chemicals by InChI.
+    Matching strategy (in order):
+      1. Strict InChI match after stripping the /p proton layer.
+      2. Loose InChI match also stripping /t /m /s stereo layers — adds ALL chemicals
+         with that connectivity so both stereoisomers reach shell 0 (handles SAM-like
+         cases where MetaCyc encodes the same cofactor with inconsistent stereo).
+      3. Name match (case-insensitive).
     """
-    # Build InChI → Chemical lookup (strip quotes for matching)
-    inchi_to_chem: dict[str, Chemical] = {}
+    # Build two lookups: strict (/p stripped) and loose (/p+stereo stripped)
+    strict_lookup: dict[str, Chemical] = {}
+    loose_lookup: dict[str, list[Chemical]] = {}
     name_to_chem: dict[str, Chemical] = {}
+
     for chem in chemicals.values():
-        clean_inchi = chem.inchi.strip('"')
-        if clean_inchi:
-            inchi_to_chem[clean_inchi] = chem
+        raw = chem.inchi.strip('"')
+        strict_key = _strip_proton(raw)
+        loose_key = _strip_stereo(raw)
+        if strict_key:
+            strict_lookup[strict_key] = chem
+        if loose_key:
+            loose_lookup.setdefault(loose_key, []).append(chem)
         if chem.name:
             name_to_chem[chem.name.lower()] = chem
 
@@ -95,14 +120,26 @@ def parse_metabolite_list(
             continue
         parts = line.split("\t")
         name = parts[0] if len(parts) > 0 else ""
-        inchi = parts[1].strip('"') if len(parts) > 1 else ""
+        raw_inchi = parts[1].strip('"') if len(parts) > 1 else ""
 
-        # Try matching by InChI first, then by name
         matched = False
-        if inchi and inchi in inchi_to_chem:
-            metabolites.add(inchi_to_chem[inchi])
+
+        # Pass 1: strict match (ionization-normalized)
+        strict_key = _strip_proton(raw_inchi)
+        if strict_key and strict_key in strict_lookup:
+            metabolites.add(strict_lookup[strict_key])
             matched = True
-        elif name.lower() in name_to_chem:
+
+        # Pass 2: loose match (stereo-normalized) — always runs so all stereoisomers
+        # of a cofactor reach shell 0, not just the one that happened to match strictly.
+        loose_key = _strip_stereo(raw_inchi)
+        if loose_key and loose_key in loose_lookup:
+            for chem in loose_lookup[loose_key]:
+                metabolites.add(chem)
+            matched = True
+
+        # Pass 3: name match
+        if not matched and name.lower() in name_to_chem:
             metabolites.add(name_to_chem[name.lower()])
             matched = True
 
