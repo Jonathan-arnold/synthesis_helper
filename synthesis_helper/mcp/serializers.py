@@ -80,6 +80,7 @@ def annotated_enzyme_to_dto(ae: AnnotatedEnzyme) -> dict[str, Any]:
         "enzyme_name": ae.name,
         "is_orphan": ae.is_orphan,
         "is_p450": ae.is_p450,
+        "is_heme": ae.is_heme,
         "ec_class": ae.ec_class,
         "substrate_ids": list(ae.substrate_ids),
         "product_ids": list(ae.product_ids),

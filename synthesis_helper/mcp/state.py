@@ -53,6 +53,31 @@ def _name_matches_cofactor(lname: str, alts: frozenset[str]) -> bool:
     return False
 
 
+# Canonical toxic / reactive intermediates known to stall heterologous
+# pathways in E. coli — reactive aldehydes (genotoxic / crosslinking),
+# phenolics prone to auto-oxidation / quinone formation, Michael acceptors,
+# and ROS-generating quinones. A pathway touching any of these flags a
+# downstream production risk regardless of whether the individual step is
+# catalytically clean. Intentionally conservative: false positives here
+# would blame innocent pathways. Match semantics mirror `_COFACTOR_MATCHERS`
+# (equality or "<alt> (" prefix for MetaCyc charge / stereo variants).
+_TOXIC_INTERMEDIATE_MATCHERS: list[tuple[str, frozenset[str]]] = [
+    ("formaldehyde",           frozenset({"formaldehyde", "methanal"})),
+    ("acetaldehyde",           frozenset({"acetaldehyde", "ethanal"})),
+    ("glycolaldehyde",         frozenset({"glycolaldehyde"})),
+    ("methylglyoxal",          frozenset({"methylglyoxal"})),
+    ("catechol",               frozenset({"catechol", "pyrocatechol",
+                                          "1,2-benzenediol", "1,2-dihydroxybenzene"})),
+    ("hydroquinone",           frozenset({"hydroquinone", "p-hydroquinone",
+                                          "1,4-benzenediol", "1,4-dihydroxybenzene"})),
+    ("acrylate",               frozenset({"acrylate", "acrylic acid", "prop-2-enoate"})),
+    ("4-hydroxybenzaldehyde",  frozenset({"4-hydroxybenzaldehyde"})),
+    ("salicylaldehyde",        frozenset({"salicylaldehyde", "2-hydroxybenzaldehyde"})),
+    ("menadione",              frozenset({"menadione", "vitamin k3",
+                                          "2-methyl-1,4-naphthoquinone"})),
+]
+
+
 @dataclass
 class _State:
     data_dir: Path = DEFAULT_DATA_DIR
@@ -65,6 +90,7 @@ class _State:
     fed_hypergraphs: dict[tuple[int, ...], HyperGraph] = field(default_factory=dict)
     ec_names: dict[str, str] | None = None
     named_cofactor_ids: dict[str, frozenset[int]] | None = None
+    toxic_intermediate_map: dict[int, str] | None = None
     fingerprint_index: list[tuple[int, object]] | None = None
     fingerprint_build_ms: float = 0.0
     fingerprint_skipped: int = 0
@@ -96,6 +122,7 @@ def reset() -> None:
         _state.fed_hypergraphs.clear()
         _state.ec_names = None
         _state.named_cofactor_ids = None
+        _state.toxic_intermediate_map = None
         _state.fingerprint_index = None
         _state.fingerprint_build_ms = 0.0
         _state.fingerprint_skipped = 0
@@ -273,6 +300,33 @@ def get_named_cofactor_ids() -> dict[str, frozenset[int]]:
                         break
             _state.named_cofactor_ids = {k: frozenset(v) for k, v in buckets.items()}
         return _state.named_cofactor_ids
+
+
+def get_toxic_intermediate_map() -> dict[int, str]:
+    """Chem id → canonical toxic-intermediate label for every chemical in the
+    corpus whose name matches ``_TOXIC_INTERMEDIATE_MATCHERS``.
+
+    Scans the full chemical corpus (not just currency) since toxic
+    intermediates are, by definition, NOT cofactors — they're pathway-specific
+    metabolites. Each chem is assigned to at most one label (first match
+    wins, same equality-or-paren-variant semantics as cofactor matching).
+    """
+    with _lock:
+        if _state.toxic_intermediate_map is None:
+            if _state.chemicals is None:
+                _bootstrap()
+            assert _state.chemicals is not None
+            assigned: dict[int, str] = {}
+            for chem in _state.chemicals.values():
+                lname = (chem.name or "").lower()
+                if not lname:
+                    continue
+                for label, alts in _TOXIC_INTERMEDIATE_MATCHERS:
+                    if _name_matches_cofactor(lname, alts):
+                        assigned.setdefault(chem.id, label)
+                        break
+            _state.toxic_intermediate_map = assigned
+        return _state.toxic_intermediate_map
 
 
 def get_ec_names() -> dict[str, str]:

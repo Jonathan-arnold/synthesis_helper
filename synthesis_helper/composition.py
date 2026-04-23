@@ -62,6 +62,19 @@ def _is_p450(ecnum: str) -> bool:
     return ecnum.startswith("1.14.")
 
 
+# EC prefixes for heme-dependent enzyme families. P450 monooxygenases sit in
+# 1.14.*, peroxidases in 1.11.1.*, and many dioxygenases in 1.13.11.*. A
+# pathway with any of these competes with the host for heme + heme-cofactor
+# supply chain (ALA, hemA) regardless of whether the specific step is a
+# classical P450. Strict superset of ``_is_p450`` by construction.
+def _is_heme(ecnum: str) -> bool:
+    return (
+        ecnum.startswith("1.14.")
+        or ecnum.startswith("1.11.1.")
+        or ecnum.startswith("1.13.11.")
+    )
+
+
 @dataclass
 class AnnotatedEnzyme:
     """One composition step annotated for research / engineering decisions."""
@@ -70,6 +83,7 @@ class AnnotatedEnzyme:
     name: str
     is_orphan: bool  # ecnum blank OR not in enzyme_map
     is_p450: bool    # ecnum starts with 1.14.
+    is_heme: bool    # P450 ∪ peroxidases (1.11.1.*) ∪ dioxygenases (1.13.11.*)
     ec_class: str    # Oxidoreductase / Transferase / … / Unknown
     substrate_ids: list[int] = field(default_factory=list)
     product_ids: list[int] = field(default_factory=list)
@@ -97,6 +111,7 @@ def annotate_pathway(
                 name=name or (f"Unknown_EC_{ec}" if ec else f"rxn_{rxn.id}"),
                 is_orphan=(not ec) or (ec not in enzyme_map),
                 is_p450=_is_p450(ec),
+                is_heme=_is_heme(ec),
                 ec_class=_ec_class(ec),
                 substrate_ids=sorted(s.id for s in rxn.substrates),
                 product_ids=sorted(p.id for p in rxn.products),

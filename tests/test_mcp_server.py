@@ -258,7 +258,7 @@ def test_pathway_to_composition_shape():
     assert out["step_count"] == len(out["enzymes"])
     for e in out["enzymes"]:
         assert {"step", "ecnum", "enzyme_name", "is_orphan", "is_p450",
-                "ec_class", "substrate_ids", "product_ids"} <= set(e)
+                "is_heme", "ec_class", "substrate_ids", "product_ids"} <= set(e)
 
 
 def test_pathway_to_composition_flags_p450_and_orphan_consistently():
@@ -275,11 +275,20 @@ def test_pathway_to_composition_flags_p450_and_orphan_consistently():
             ec = e["ecnum"]
             if ec.startswith("1.14."):
                 assert e["is_p450"] is True
+                assert e["is_heme"] is True  # heme is strict superset of P450
                 assert e["is_orphan"] is True  # no entry in fixture's ec_names
             else:
                 assert e["is_p450"] is False
+            # Heme ⊇ P450, so is_heme ⇒ is_p450 OR (peroxidase / dioxygenase)
+            if e["is_heme"]:
+                assert (
+                    ec.startswith("1.14.")
+                    or ec.startswith("1.11.1.")
+                    or ec.startswith("1.13.11.")
+                )
             if ec == "2.7.1.1":
                 assert e["is_orphan"] is False
+                assert e["is_heme"] is False
                 assert e["enzyme_name"] == "hexokinase"
                 assert e["ec_class"] == "Transferase"
 
@@ -306,24 +315,37 @@ def test_compare_pathways_basic_shape():
     # Every row must carry the expected cofactor keys, even when 0.
     expected_keys = {"NADPH", "NADH", "NADP+", "NAD+", "ATP", "CoA", "SAM"}
     assert set(out["cofactor_keys"]) == expected_keys
+    # Every row must carry all flag fields (count or hint) even when 0.
+    flag_fields = {
+        "n_p450", "n_heme", "n_orphan_steps", "n_toxic_intermediate",
+        "toxic_intermediates", "nadh_hint", "nadph_hint", "atp_hint",
+    }
     for row in out["comparison"]:
         assert set(row["cofactor_uses"]) == expected_keys
+        assert flag_fields <= set(row)
 
 
 def test_compare_pathways_sort_order():
-    # Rows are sorted by (step_count asc, n_p450 asc, n_orphan_steps asc).
+    # Rows are sorted by (step_count, n_heme, n_toxic_intermediate,
+    # n_orphan_steps) — all ascending.
     out = compare_pathways("T", n=5)
     rows = out["comparison"]
-    keys = [(r["step_count"], r["n_p450"], r["n_orphan_steps"]) for r in rows]
+    keys = [
+        (r["step_count"], r["n_heme"], r["n_toxic_intermediate"], r["n_orphan_steps"])
+        for r in rows
+    ]
     assert keys == sorted(keys)
 
 
 def test_compare_pathways_flags_p450_pathway():
     # At least one of the T pathways includes R6 (EC 1.14.13.1). Find it
-    # and assert the P450 + orphan flags propagate up to the scorecard.
+    # and assert the P450 + heme + orphan flags propagate up to the scorecard.
     out = compare_pathways("T", n=5)
     has_p450_row = any(r["n_p450"] >= 1 for r in out["comparison"])
     assert has_p450_row, "expected at least one T pathway to hit R6 (EC 1.14.)"
+    # n_heme must be >= n_p450 per-row (heme is a strict superset).
+    for r in out["comparison"]:
+        assert r["n_heme"] >= r["n_p450"]
     has_orphan_row = any(r["n_orphan_steps"] >= 1 for r in out["comparison"])
     assert has_orphan_row
 

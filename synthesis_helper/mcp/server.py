@@ -241,7 +241,7 @@ def pathway_to_composition(
     than a Markdown narrative.
 
     Returns ordered per-step rows: ``{step, ecnum, enzyme_name, is_orphan,
-    is_p450, ec_class, substrate_ids, product_ids}``.
+    is_p450, is_heme, ec_class, substrate_ids, product_ids}``.
 
     - ``is_orphan``: the reaction has no EC number OR the EC is missing from
       the EC → enzyme name table. These steps need curation before cloning.
@@ -249,6 +249,9 @@ def pathway_to_composition(
       family. Notoriously hard to express in *E. coli* (needs electron
       partners, often membrane-bound). Useful flag for "please give me a
       pathway without any P450s".
+    - ``is_heme``: broader superset of ``is_p450`` — also flags peroxidases
+      (EC ``1.11.1.*``) and dioxygenases (``1.13.11.*``). Any of these
+      competes with the host for heme + heme-biosynthesis supply.
     - ``ec_class``: Oxidoreductase / Transferase / … / Unknown.
 
     Use ``compare_pathways`` first when the user wants to pick *which*
@@ -289,8 +292,8 @@ def compare_pathways(
     route". Use instead of calling ``pathway_to_composition`` N times.
 
     Returns a dict with a ``comparison`` list, sorted by
-    ``(step_count, n_p450, n_orphan_steps)`` so row 0 is the first-pass
-    most-viable candidate. Each row carries:
+    ``(step_count, n_heme, n_toxic_intermediate, n_orphan_steps)`` so row 0
+    is the first-pass most-viable candidate. Each row carries:
 
     - ``pathway_index`` — the original enumeration index (hand back to
       ``pathway_to_composition``, ``describe_pathway``, or
@@ -299,13 +302,24 @@ def compare_pathways(
     - ``unique_ecs`` (set of EC strings), ``unique_ec_classes`` (EC-class
       diversity — higher usually means a more varied cascade)
     - ``n_orphan_steps`` (reactions with no / unmapped EC)
-    - ``n_p450`` (EC starts with ``1.14.``)
+    - ``n_p450`` (EC starts with ``1.14.``) — narrow P450 flag.
+    - ``n_heme`` — superset of ``n_p450``: also counts peroxidases
+      (``1.11.1.*``) and dioxygenases (``1.13.11.*``). Any of these competes
+      with the host for heme + heme-biosynthesis (ALA, hemA) supply, so this
+      is a better "hard to express aerobically" signal than P450 alone.
+    - ``n_toxic_intermediate`` — count of pathway reactions whose substrates
+      or products touch a curated blacklist of reactive / toxic metabolites
+      (reactive aldehydes, catechol / hydroquinone, acrylate, menadione, …).
+      ``toxic_intermediates`` (list of canonical names) lets the caller see
+      which ones were hit.
     - ``cofactor_uses`` — dict keyed by ATP / NADH / NADPH / NAD+ / NADP+ /
       CoA / SAM; value = reaction count consuming or producing that cofactor
       in this pathway (stoichiometry-agnostic: one reaction → one count).
-    - ``redox_hint`` — crude net NAD(P)H balance: positive → pathway tends
-      to reduce cofactors (substrate side); negative → tends to regenerate
-      them. Stoichiometry-agnostic, treat as directional signal only.
+    - ``nadh_hint`` / ``nadph_hint`` / ``atp_hint`` — crude net balance for
+      each cofactor: +1 per reaction consuming (on substrate side), -1 per
+      reaction regenerating (on product side). Positive = pathway drains
+      that pool. NADH and NADPH pools are biologically separate (NADPH is
+      biosynthetic, scarcer) so they're reported independently.
 
     ``cofactor_keys`` at the top level lists every key present in each row's
     ``cofactor_uses`` dict so callers can build tabular views reliably.
@@ -322,7 +336,11 @@ def compare_pathways(
 
     ec_names = state.get_ec_names()
     cofactor_ids = state.get_named_cofactor_ids()
-    nadh_like = cofactor_ids["NADH"] | cofactor_ids["NADPH"]
+    toxic_map = state.get_toxic_intermediate_map()
+    toxic_ids = frozenset(toxic_map.keys())
+    nadh_ids = cofactor_ids["NADH"]
+    nadph_ids = cofactor_ids["NADPH"]
+    atp_ids = cofactor_ids["ATP"]
 
     def _metrics_for(pw) -> dict[str, Any]:
         ecs = {r.ecnum for r in pw.reactions if r.ecnum}
@@ -330,8 +348,18 @@ def compare_pathways(
                       if r.ecnum and r.ecnum[:1].isdigit()}
         n_orphan = sum(1 for r in pw.reactions if (not r.ecnum) or r.ecnum not in ec_names)
         n_p450 = sum(1 for r in pw.reactions if r.ecnum.startswith("1.14."))
+        n_heme = sum(
+            1 for r in pw.reactions
+            if r.ecnum.startswith("1.14.")
+            or r.ecnum.startswith("1.11.1.")
+            or r.ecnum.startswith("1.13.11.")
+        )
         cofactor_uses: dict[str, int] = {key: 0 for key in state.COFACTOR_KEYS}
-        redox = 0
+        nadh_hint = 0
+        nadph_hint = 0
+        atp_hint = 0
+        n_toxic = 0
+        toxic_seen: set[str] = set()
         for rxn in pw.reactions:
             sub_ids = {s.id for s in rxn.substrates}
             prod_ids = {p.id for p in rxn.products}
@@ -339,25 +367,48 @@ def compare_pathways(
             for key in state.COFACTOR_KEYS:
                 if touching & cofactor_ids[key]:
                     cofactor_uses[key] += 1
-            # Net NAD(P)H direction: +1 if consumed as substrate, -1 if
-            # regenerated as product. Rough — ignores stoichiometry.
-            if sub_ids & nadh_like:
-                redox += 1
-            if prod_ids & nadh_like:
-                redox -= 1
+            # Net direction per pool: +1 if consumed (substrate), -1 if
+            # regenerated (product). Stoichiometry-agnostic.
+            if sub_ids & nadh_ids:
+                nadh_hint += 1
+            if prod_ids & nadh_ids:
+                nadh_hint -= 1
+            if sub_ids & nadph_ids:
+                nadph_hint += 1
+            if prod_ids & nadph_ids:
+                nadph_hint -= 1
+            if sub_ids & atp_ids:
+                atp_hint += 1
+            if prod_ids & atp_ids:
+                atp_hint -= 1
+            hit_toxic = touching & toxic_ids
+            if hit_toxic:
+                n_toxic += 1
+                for cid in hit_toxic:
+                    toxic_seen.add(toxic_map[cid])
         return {
             "unique_ecs": sorted(ecs),
             "unique_ec_classes": sorted(ec_classes),
             "n_orphan_steps": n_orphan,
             "n_p450": n_p450,
+            "n_heme": n_heme,
+            "n_toxic_intermediate": n_toxic,
+            "toxic_intermediates": sorted(toxic_seen),
             "cofactor_uses": cofactor_uses,
-            "redox_hint": redox,
+            "nadh_hint": nadh_hint,
+            "nadph_hint": nadph_hint,
+            "atp_hint": atp_hint,
         }
 
     rows: list[tuple[int, Any, dict[str, Any]]] = [
         (i, pw, _metrics_for(pw)) for i, pw in enumerate(pathways)
     ]
-    rows.sort(key=lambda t: (len(t[1].reactions), t[2]["n_p450"], t[2]["n_orphan_steps"]))
+    rows.sort(key=lambda t: (
+        len(t[1].reactions),
+        t[2]["n_heme"],
+        t[2]["n_toxic_intermediate"],
+        t[2]["n_orphan_steps"],
+    ))
     comparison = [
         pathway_comparison_row_to_dto(i, pw, metrics, hg) for (i, pw, metrics) in rows
     ]
