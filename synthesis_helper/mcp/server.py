@@ -562,6 +562,7 @@ def open_pathway_interactive(
         pathways[pathway_index], hg, state.get_ec_names(),
         chem_id_to_name=chem_id_to_name,
         currency_chemicals=state.get_currency_chemicals(),
+        toxic_chem_ids=set(state.get_toxic_intermediate_map().keys()),
     )
     path = _write_html(
         f"pathway_{_slug(chem.name or f'chem{chem.id}')}_{pathway_index}_", html
@@ -631,6 +632,7 @@ def open_cascade_interactive(
         cascade, hg, state.get_ec_names(),
         max_reactions=max_reactions, chem_id_to_name=chem_id_to_name,
         currency_chemicals=state.get_currency_chemicals(),
+        toxic_chem_ids=set(state.get_toxic_intermediate_map().keys()),
     )
     path = _write_html(f"cascade_{_slug(chem.name or f'chem{chem.id}')}_", html)
     opened, err = _open_in_viewer(path)

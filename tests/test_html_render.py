@@ -128,6 +128,70 @@ def test_pathway_meta_defaults(target_and_pathways, small_cell_hg):
     assert meta["themes"] == list(hr.PATHWAY_THEMES)
 
 
+def test_pathway_reaction_flags_populated(small_cell, target_and_pathways, small_cell_hg):
+    # Every reaction node must carry the four engineering flags. R6 in the
+    # fixture (EC 1.14.13.1) has no ec_names entry → is_p450 ∧ is_heme ∧
+    # is_orphan all true. R7 (EC 2.7.1.1 / hexokinase) has an entry → none
+    # of the flags fire. Verify both cases appear in at least one rendered
+    # pathway.
+    _, _, pathways = target_and_pathways
+    ec_names = {"2.7.1.1": "hexokinase", "1.1.1.1": "alcohol dehydrogenase"}
+    required = {"is_p450", "is_heme", "is_orphan", "has_toxic_neighbor"}
+
+    seen_p450_orphan = False
+    seen_clean = False
+    for pw in pathways:
+        html = hr.render_pathway_html(pw, small_cell_hg, ec_to_name=ec_names)
+        payload = _extract_payload(html)
+        for n in payload["nodes"]:
+            d = n["data"]
+            if d["kind"] != "reaction":
+                continue
+            assert required <= set(d), f"rxn {d['rxn_id']} missing flags"
+            if d["ecnum"] == "1.14.13.1":
+                assert d["is_p450"] and d["is_heme"] and d["is_orphan"]
+                seen_p450_orphan = True
+            if d["ecnum"] == "2.7.1.1":
+                assert not d["is_p450"] and not d["is_heme"] and not d["is_orphan"]
+                seen_clean = True
+
+    assert seen_p450_orphan, "expected at least one pathway to route through R6"
+    assert seen_clean, "expected at least one pathway to route through R7"
+
+
+def test_pathway_toxic_chem_flagging(small_cell, target_and_pathways, small_cell_hg):
+    # Synthetic test: pass a toxic_chem_ids set that names an arbitrary
+    # intermediate (M1 — acetaldehyde-flavored node in the fixture) and
+    # verify it propagates to both the chemical node (is_toxic) and any
+    # reaction whose substrate/product set touches it (has_toxic_neighbor).
+    _, _, pathways = target_and_pathways
+    M1 = small_cell.chems["M1"]
+    toxic = {M1.id}
+
+    saw_toxic_chem = False
+    saw_touching_rxn = False
+    for pw in pathways:
+        html = hr.render_pathway_html(
+            pw, small_cell_hg, toxic_chem_ids=toxic,
+        )
+        payload = _extract_payload(html)
+        for n in payload["nodes"]:
+            d = n["data"]
+            if d["kind"] == "chemical" and d["chem_id"] == M1.id:
+                assert d["is_toxic"] is True
+                saw_toxic_chem = True
+            if d["kind"] == "reaction":
+                touches = M1.id in d["substrate_ids"] or M1.id in d["product_ids"]
+                assert d["has_toxic_neighbor"] is touches
+
+                if touches:
+                    saw_touching_rxn = True
+
+    # M1 is produced by R1 and consumed by R2 / R9, at least one must appear.
+    if saw_toxic_chem:
+        assert saw_touching_rxn, "M1 should be touched by at least one rxn"
+
+
 # ---------------------------------------------------------------------------
 # Cascade
 # ---------------------------------------------------------------------------

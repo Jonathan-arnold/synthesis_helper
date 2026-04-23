@@ -54,6 +54,29 @@ _ROLE_LABELS: dict[str, str] = {
 }
 
 
+# Engineering-relevant flag detection. Mirrors the definitions used by
+# compare_pathways / annotate_pathway so the visualizer's overlay agrees with
+# the numeric scorecards.
+def _is_p450_ec(ecnum: str) -> bool:
+    return ecnum.startswith("1.14.")
+
+
+def _is_heme_ec(ecnum: str) -> bool:
+    return (
+        ecnum.startswith("1.14.")
+        or ecnum.startswith("1.11.1.")
+        or ecnum.startswith("1.13.11.")
+    )
+
+
+def _is_orphan_ec(ecnum: str, ec_to_name: Mapping[str, str] | None) -> bool:
+    if not ecnum:
+        return True
+    if ec_to_name is None:
+        return False
+    return ecnum not in ec_to_name
+
+
 def _ec_class_group(ecnum: str) -> str:
     if not ecnum:
         return "ec_other"
@@ -242,8 +265,10 @@ def _build_cytoscape_payload(
     themes_in_view: tuple[str, ...],
     chem_id_to_name: Mapping[int, str],
     currency_chemicals: set[Chemical] | None = None,
+    toxic_chem_ids: set[int] | None = None,
 ) -> dict:
     currency_set = currency_chemicals or set()
+    toxic_ids = toxic_chem_ids or set()
     reactions_list = list(reactions)
 
     chems_used: dict[Chemical, int | None] = {}
@@ -276,6 +301,7 @@ def _build_cytoscape_payload(
                     "shell": shell,
                     "is_target": is_target,
                     "is_currency": chem in currency_set,
+                    "is_toxic": chem.id in toxic_ids,
                     "name": _real_name(chem.name),
                     "chem_id": chem.id,
                     "inchi": chem.inchi or "",
@@ -292,6 +318,8 @@ def _build_cytoscape_payload(
         themes_dict = rxn_themes.get(rxn, {t: None for t in themes_in_view})
         subs_sorted = sorted(rxn.substrates, key=lambda x: x.id)
         prods_sorted = sorted(rxn.products, key=lambda x: x.id)
+        touching_ids = {s.id for s in subs_sorted} | {p.id for p in prods_sorted}
+        ec = rxn.ecnum or ""
         nodes.append(
             {
                 "data": {
@@ -300,8 +328,12 @@ def _build_cytoscape_payload(
                     "label": _rxn_label_short(rxn, ec_to_name),
                     "shell": hg.reaction_to_shell.get(rxn),
                     "rxn_id": rxn.id,
-                    "ecnum": rxn.ecnum or "",
+                    "ecnum": ec,
                     "enzyme_name": enzyme_name,
+                    "is_p450": _is_p450_ec(ec),
+                    "is_heme": _is_heme_ec(ec),
+                    "is_orphan": _is_orphan_ec(ec, ec_to_name),
+                    "has_toxic_neighbor": bool(touching_ids & toxic_ids),
                     "substrate_ids": [s.id for s in subs_sorted],
                     "product_ids": [p.id for p in prods_sorted],
                     "substrate_names": [
@@ -384,7 +416,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
                font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
                color: var(--text); font-size: 14px; }
   #toolbar {
-    position: fixed; top: 0; left: 0; right: 0; height: 128px;
+    position: fixed; top: 0; left: 0; right: 0; height: 160px;
     background: var(--toolbar-bg); border-bottom: 1px solid var(--toolbar-divider);
     display: flex; align-items: center; padding: 0 16px; gap: 16px; z-index: 10;
   }
@@ -410,7 +442,15 @@ _HTML_TEMPLATE = r"""<!doctype html>
     width: 180px;
   }
   #actions input:focus { border-color: #42A5F5; }
-  #cy { position: fixed; top: 128px; left: 0; right: 0; bottom: 0; background: var(--bg); }
+  #cy { position: fixed; top: 160px; left: 0; right: 0; bottom: 0; background: var(--bg); }
+  button.pick .count {
+    margin-left: 6px; font-size: 11px; color: var(--subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  button.pick.active .count { color: var(--text); }
+  button.pick:disabled {
+    color: #BDBDBD; cursor: not-allowed; background: transparent;
+  }
   #toast {
     position: fixed; bottom: 16px; right: 16px;
     background: #FFFFFF; border: 1px solid var(--ok);
@@ -447,6 +487,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
     <div class="picker-row">
       <div class="lbl">Cofactors</div>
       <div class="buttons" id="cofactor-buttons"></div>
+    </div>
+    <div class="picker-row">
+      <div class="lbl">Flags</div>
+      <div class="buttons" id="flag-buttons"></div>
     </div>
   </div>
   <div id="actions">
@@ -706,6 +750,36 @@ _HTML_TEMPLATE = r"""<!doctype html>
           'padding': '14px',
         }},
       { selector: 'node[display = "none"]', style: { 'display': 'none' } },
+      // Flag overlays. Each rule only fires when the user has toggled the
+      // corresponding flag on — gated by the node-level `flag_*_on` data
+      // attribute the JS sets in refreshFlags(). Priority (overridden later
+      // in this array = higher): orphan → toxic → heme → p450.
+      { selector: 'node[kind = "reaction"][?flag_orphan_on]',
+        style: {
+          'background-color': '#BDBDBD',
+          'border-width': 2,
+          'border-color': '#616161',
+          'border-style': 'dashed',
+          'color': '#212121',
+        }},
+      { selector: 'node[?flag_toxic_on]',
+        style: {
+          'border-width': 3,
+          'border-color': '#EF6C00',
+          'border-style': 'solid',
+        }},
+      { selector: 'node[kind = "reaction"][?flag_heme_on]',
+        style: {
+          'border-width': 3,
+          'border-color': '#E53935',
+          'border-style': 'solid',
+        }},
+      { selector: 'node[kind = "reaction"][?flag_p450_on]',
+        style: {
+          'border-width': 4,
+          'border-color': '#B71C1C',
+          'border-style': 'solid',
+        }},
       { selector: 'node:selected',
         style: {
           'border-width': 3,
@@ -831,6 +905,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
     cy.add(elements);
     runLayout(currentLayoutName);
     refreshCofactorButtons();
+    // Newly-added nodes need their flag_*_on data populated to match the
+    // currently active flag set; otherwise the overlay silently drops after
+    // a cofactor-mode switch.
+    refreshFlags();
   }
 
   // Toolbar wiring
@@ -898,11 +976,76 @@ _HTML_TEMPLATE = r"""<!doctype html>
     });
   }
 
+  // ---- Flag overlay (P450 / Heme / Orphan / Toxic) ----
+  // Each flag toggles independently and multiply-applies. The p450/heme/orphan
+  // flags live on reaction nodes; toxic lives on chemicals (is_toxic) and
+  // spreads to any reaction touching one (has_toxic_neighbor).
+  const FLAGS = [
+    { key: 'p450',   label: 'P450',   matches: (d) => d.kind === 'reaction' && !!d.is_p450 },
+    { key: 'heme',   label: 'Heme',   matches: (d) => d.kind === 'reaction' && !!d.is_heme },
+    { key: 'orphan', label: 'Orphan', matches: (d) => d.kind === 'reaction' && !!d.is_orphan },
+    { key: 'toxic',  label: 'Toxic',
+      matches: (d) => (d.kind === 'chemical' && !!d.is_toxic)
+                   || (d.kind === 'reaction' && !!d.has_toxic_neighbor) },
+  ];
+  const activeFlags = new Set();
+  const flagBtnContainer = document.getElementById('flag-buttons');
+
+  function countFlag(flag) {
+    let n = 0;
+    for (const node of ORIGINAL_NODES) {
+      if (node.data.kind === 'group') continue;
+      if (flag.matches(node.data)) n += 1;
+    }
+    return n;
+  }
+
+  function refreshFlags() {
+    // For each node currently in the graph, set its flag_<key>_on data to
+    // true iff the node matches and the flag is active. Cytoscape style
+    // selectors (declared in the stylesheet) pick these up automatically.
+    cy.batch(() => {
+      cy.nodes().not('[kind = "group"]').forEach(n => {
+        const d = n.data();
+        for (const flag of FLAGS) {
+          const on = activeFlags.has(flag.key) && flag.matches(d);
+          n.data('flag_' + flag.key + '_on', on);
+        }
+      });
+    });
+  }
+
+  function refreshFlagButtons() {
+    Array.from(flagBtnContainer.children).forEach(b => {
+      if (!b.dataset || !b.dataset.flag) return;
+      b.classList.toggle('active', activeFlags.has(b.dataset.flag));
+    });
+  }
+
+  FLAGS.forEach(flag => {
+    const n = countFlag(flag);
+    const btn = document.createElement('button');
+    btn.className = 'pick';
+    btn.dataset.flag = flag.key;
+    btn.disabled = (n === 0);
+    btn.innerHTML = flag.label + '<span class="count">' + n + '</span>';
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      if (activeFlags.has(flag.key)) activeFlags.delete(flag.key);
+      else activeFlags.add(flag.key);
+      refreshFlags();
+      refreshFlagButtons();
+    });
+    flagBtnContainer.appendChild(btn);
+  });
+
   document.getElementById('fit-btn').addEventListener('click', () => cy.fit(null, 24));
   document.getElementById('reset-btn').addEventListener('click', () => {
     clearFocus();
     currentThemeName = META.default_theme;
+    activeFlags.clear();
     applyCofactorMode('inline');
+    refreshFlagButtons();
     runLayout('preset');
     cy.fit(null, 24);
   });
@@ -931,13 +1074,22 @@ _HTML_TEMPLATE = r"""<!doctype html>
   });
 
   // Copy-on-dblclick
+  function flagsLine(d) {
+    const tags = [];
+    if (d.is_p450) tags.push('P450');
+    if (d.is_heme && !d.is_p450) tags.push('heme');
+    if (d.is_orphan) tags.push('orphan');
+    if (d.has_toxic_neighbor) tags.push('touches toxic');
+    if (d.is_toxic) tags.push('toxic intermediate');
+    return tags.length ? '\nFlags: [' + tags.join(', ') + ']' : '';
+  }
   function formatForCopy(d) {
     if (d.kind === 'chemical') {
       const nameSuffix = d.name ? ' "' + d.name + '"' : '';
       const lines = ['Chemical #' + d.chem_id + nameSuffix + ' — shell=' + d.shell];
       if (d.inchi) lines.push('InChI=' + d.inchi);
       if (d.smiles) lines.push('SMILES=' + d.smiles);
-      return lines.join('\n');
+      return lines.join('\n') + flagsLine(d);
     }
     if (d.kind === 'reaction') {
       const ec = d.ecnum ? ('EC ' + d.ecnum) : 'no EC';
@@ -946,7 +1098,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
       const prods = d.product_names.map((n, i) => '#' + d.product_ids[i] + ' ' + n).join(' + ');
       return 'Reaction #' + d.rxn_id + ' — ' + ec + enz + ' — shell=' + d.shell +
              '\nSubstrates: ' + subs +
-             '\nProducts:   ' + prods;
+             '\nProducts:   ' + prods +
+             flagsLine(d);
     }
     return '';
   }
@@ -1051,6 +1204,8 @@ _HTML_TEMPLATE = r"""<!doctype html>
   refreshLayoutButtons();
   refreshThemeButtons();
   refreshCofactorButtons();
+  refreshFlagButtons();
+  refreshFlags();
   runLayout('preset');
 })();
 </script>
@@ -1097,6 +1252,7 @@ def render_pathway_html(
     ec_to_name: Mapping[str, str] | None = None,
     chem_id_to_name: Mapping[int, str] | None = None,
     currency_chemicals: set[Chemical] | None = None,
+    toxic_chem_ids: set[int] | None = None,
 ) -> str:
     chem_themes, rxn_themes, group_specs = _compute_themes_for_pathway(pathway, hg)
     chem_map = chem_id_to_name or {c.id: _chem_label_short(c) for c in pathway.metabolites}
@@ -1112,6 +1268,7 @@ def render_pathway_html(
         themes_in_view=PATHWAY_THEMES,
         chem_id_to_name=chem_map,
         currency_chemicals=currency_chemicals,
+        toxic_chem_ids=toxic_chem_ids,
     )
     title = f"Pathway → {pathway.target.name or f'#{pathway.target.id}'}"
     return _render_html(payload, title)
@@ -1124,6 +1281,7 @@ def render_cascade_html(
     max_reactions: int = 200,
     chem_id_to_name: Mapping[int, str] | None = None,
     currency_chemicals: set[Chemical] | None = None,
+    toxic_chem_ids: set[int] | None = None,
 ) -> str:
     n = len(cascade.reactions)
     if n > max_reactions:
@@ -1149,6 +1307,7 @@ def render_cascade_html(
         themes_in_view=CASCADE_THEMES,
         chem_id_to_name=chem_map,
         currency_chemicals=currency_chemicals,
+        toxic_chem_ids=toxic_chem_ids,
     )
     title = f"Cascade → {cascade.target.name or f'#{cascade.target.id}'}"
     return _render_html(payload, title)
