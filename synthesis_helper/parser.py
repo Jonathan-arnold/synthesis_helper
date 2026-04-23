@@ -83,12 +83,18 @@ def parse_reactions(
 
 
 def parse_metabolite_list(
-    filepath: str | Path, chemicals: dict[int, Chemical]
+    filepath: str | Path,
+    chemicals: dict[int, Chemical],
+    descriptor_filter: set[str] | None = None,
 ) -> set[Chemical]:
     """Parse a metabolite list file (minimal_metabolites.txt or ubiquitous_metabolites.txt).
 
     Expected format (tab-separated, with header, possibly \\r line endings):
         name  inchi  descriptor
+
+    When ``descriptor_filter`` is provided, only rows whose descriptor is in
+    the set are matched (empty/missing descriptors are dropped). ``None``
+    (default) keeps every row — preserving the baseline behaviour.
 
     Matching strategy (in order):
       1. Strict InChI match after stripping the /p proton layer.
@@ -122,6 +128,10 @@ def parse_metabolite_list(
         parts = line.split("\t")
         name = parts[0] if len(parts) > 0 else ""
         raw_inchi = parts[1].strip('"') if len(parts) > 1 else ""
+        descriptor = parts[2].strip() if len(parts) > 2 else ""
+
+        if descriptor_filter is not None and descriptor not in descriptor_filter:
+            continue
 
         matched = False
 

@@ -9,29 +9,26 @@ plumbing.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 
-from synthesis_helper.mcp import server as mcp_server
 from synthesis_helper.mcp import state
 from synthesis_helper.mcp.server import (
     chemical_resource,
+    compare_pathways,
     describe_pathway,
     enumerate_pathways_for,
+    find_by_structure,
     find_chemical,
     get_cascade,
     get_shell,
     list_reachables,
-    open_cascade_externally,
-    open_pathway_externally,
+    pathway_to_composition,
     reachables_resource,
     reaction_resource,
     resynthesize_with_fed,
     stats_resource,
-    visualize_cascade,
-    visualize_pathway,
 )
 from tests.fixtures.small_cell import build_small_cell, write_small_cell_tsvs
 
@@ -122,161 +119,6 @@ def test_describe_pathway_markdown_contains_arrow():
     assert "Pathway 0" in md
 
 
-# --- visualization tools -----------------------------------------------------
-
-_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
-
-def _skip_if_no_graphviz():
-    pytest.importorskip("graphviz")
-    if shutil.which("dot") is None:
-        pytest.skip("graphviz `dot` binary not on PATH")
-
-
-def test_visualize_pathway_returns_png():
-    _skip_if_no_graphviz()
-    img = visualize_pathway("T", pathway_index=0)
-    assert img.data[:8] == _PNG_MAGIC
-    assert len(img.data) > 500
-
-
-def test_visualize_cascade_returns_png():
-    _skip_if_no_graphviz()
-    img = visualize_cascade("T")
-    assert img.data[:8] == _PNG_MAGIC
-    assert len(img.data) > 500
-
-
-def test_visualize_cascade_raises_when_too_large():
-    _skip_if_no_graphviz()
-    with pytest.raises(ValueError, match="exceeds max_reactions"):
-        visualize_cascade("T", max_reactions=0)
-
-
-# --- externally-opened viewers ----------------------------------------------
-
-
-@pytest.fixture
-def mock_viewer(monkeypatch):
-    """Stub subprocess.run inside server so tests never spawn Preview.app."""
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):  # noqa: ANN001
-        calls.append(list(cmd))
-
-        class _Result:
-            returncode = 0
-
-        return _Result()
-
-    monkeypatch.setattr(mcp_server.subprocess, "run", fake_run)
-    return calls
-
-
-def test_open_pathway_externally_writes_png_and_launches_viewer(mock_viewer):
-    _skip_if_no_graphviz()
-    out = open_pathway_externally("T", pathway_index=0)
-    p = Path(out["path"])
-    try:
-        assert p.exists()
-        assert p.read_bytes()[:8] == _PNG_MAGIC
-        assert out["opened_in_viewer"] is True
-        assert out["chemical"] == "T"
-        assert out["steps"] >= 1
-        assert out["bytes"] > 500
-        # Viewer command was invoked with the saved path
-        assert mock_viewer, "expected subprocess.run to be called"
-        assert str(p) in mock_viewer[-1]
-    finally:
-        p.unlink(missing_ok=True)
-
-
-def test_open_cascade_externally_writes_png_and_launches_viewer(mock_viewer):
-    _skip_if_no_graphviz()
-    out = open_cascade_externally("T")
-    p = Path(out["path"])
-    try:
-        assert p.exists()
-        assert p.read_bytes()[:8] == _PNG_MAGIC
-        assert out["opened_in_viewer"] is True
-        assert out["reactions"] >= 1
-    finally:
-        p.unlink(missing_ok=True)
-
-
-def test_open_pathway_externally_reports_viewer_failure(monkeypatch):
-    _skip_if_no_graphviz()
-
-    def fake_run(cmd, **kwargs):  # noqa: ANN001
-        raise FileNotFoundError("no such viewer binary")
-
-    monkeypatch.setattr(mcp_server.subprocess, "run", fake_run)
-    out = open_pathway_externally("T", pathway_index=0)
-    p = Path(out["path"])
-    try:
-        # PNG should still be written even when the viewer can't launch
-        assert p.exists()
-        assert out["opened_in_viewer"] is False
-        assert out["viewer_error"]
-    finally:
-        p.unlink(missing_ok=True)
-
-
-def test_open_pathway_externally_unreachable_raises(mock_viewer):
-    _skip_if_no_graphviz()
-    with pytest.raises(ValueError, match="not reachable"):
-        open_pathway_externally("M7")
-
-
-def test_open_pathway_externally_index_out_of_range_raises(mock_viewer):
-    _skip_if_no_graphviz()
-    with pytest.raises(ValueError, match="out of range"):
-        open_pathway_externally("T", pathway_index=9999)
-
-
-# --- reaction label formatting (enzyme name title + EC subtitle) ------------
-
-
-def test_rxn_label_with_enzyme_name_has_title_and_subtitle():
-    from synthesis_helper.mcp.visualize import _rxn_label
-    from synthesis_helper.models import Reaction
-
-    rxn = Reaction(id=42, substrates=frozenset(), products=frozenset(), ecnum="1.1.1.1")
-    label = _rxn_label(rxn, {"1.1.1.1": "Alcohol dehydrogenase"})
-    assert label.startswith("<") and label.endswith(">")
-    assert "<B>" in label and "Alcohol dehydrogenase" in label
-    assert "EC 1.1.1.1" in label
-
-
-def test_rxn_label_without_enzyme_name_falls_back_to_ec_as_title():
-    from synthesis_helper.mcp.visualize import _rxn_label
-    from synthesis_helper.models import Reaction
-
-    rxn = Reaction(id=42, substrates=frozenset(), products=frozenset(), ecnum="1.1.1.1")
-    label = _rxn_label(rxn, {})
-    assert "EC 1.1.1.1" in label
-    assert "rxn #42" in label  # subtitle
-
-
-def test_rxn_label_no_ec_no_name_uses_rxn_id_only():
-    from synthesis_helper.mcp.visualize import _rxn_label
-    from synthesis_helper.models import Reaction
-
-    rxn = Reaction(id=42, substrates=frozenset(), products=frozenset())
-    label = _rxn_label(rxn, {})
-    assert "rxn #42" in label
-    assert "<BR/>" not in label  # no subtitle
-
-
-def test_rxn_label_escapes_html_special_chars_in_name():
-    from synthesis_helper.mcp.visualize import _rxn_label
-    from synthesis_helper.models import Reaction
-
-    rxn = Reaction(id=1, substrates=frozenset(), products=frozenset(), ecnum="x")
-    label = _rxn_label(rxn, {"x": "Weird & <name>"})
-    assert "&amp;" in label and "&lt;" in label and "&gt;" in label
-
-
 def test_ec_names_loaded_from_data_dir(tmp_path):
     """state._bootstrap picks up optional ec_names.tsv."""
     from synthesis_helper.mcp.server import _resolve_or_raise  # noqa: F401
@@ -350,3 +192,152 @@ def test_unknown_chemical_resource_raises():
 def test_unknown_reaction_resource_raises():
     with pytest.raises(ValueError):
         reaction_resource("99999999")
+
+
+# ---------------------------------------------------------------------------
+# find_by_structure  (SMILES + InChI → Morgan FP + Tanimoto)
+# ---------------------------------------------------------------------------
+
+
+def test_find_by_structure_exact_match():
+    hits = find_by_structure("CCO", limit=5, similarity_threshold=0.0)
+    assert hits, "expected at least one structural hit"
+    top = hits[0]
+    assert top["name"] == "N1"
+    assert top["tanimoto"] >= 0.99
+
+
+def test_find_by_structure_includes_shell():
+    hits = find_by_structure("CCO", limit=3, similarity_threshold=0.0)
+    assert "shell" in hits[0]
+    assert hits[0]["shell"] == 0  # N1 is a native
+
+
+def test_find_by_structure_ranks_similar_structures():
+    # CCO=ethanol (N1), CC=O=acetaldehyde (M1), CC(=O)O=acetate (M2).
+    # All three carry real SMILES in the fixture. Querying with acetaldehyde
+    # should surface the other two alcohols with reasonable scores.
+    hits = find_by_structure("CC=O", limit=5, similarity_threshold=0.0)
+    names = [h["name"] for h in hits]
+    assert "M1" in names
+    # Expect the related structures to also appear
+    assert set(names) & {"N1", "M2"}, f"expected overlap with N1/M2 in {names}"
+
+
+def test_find_by_structure_threshold_filters():
+    # Benzene is nothing like the three 2-carbon molecules in the fixture
+    # — at a high threshold every hit should be dropped.
+    hits = find_by_structure("c1ccccc1", limit=10, similarity_threshold=0.9)
+    assert hits == []
+
+
+def test_find_by_structure_invalid_smiles_raises():
+    with pytest.raises(ValueError, match="Invalid SMILES"):
+        find_by_structure("not_a_smiles_$$$", limit=5)
+
+
+def test_find_by_structure_exposes_fingerprint_coverage_in_stats():
+    # Trigger index build.
+    find_by_structure("CCO", limit=1, similarity_threshold=0.0)
+    s = stats_resource()
+    fp = s.get("fingerprint_coverage")
+    assert fp is not None
+    assert fp["indexed"] >= 3   # at least N1, M1, M2
+    assert fp["fraction"] >= 0.0
+    assert "build_ms" in fp
+
+
+# ---------------------------------------------------------------------------
+# pathway_to_composition  (annotated enzyme list)
+# ---------------------------------------------------------------------------
+
+
+def test_pathway_to_composition_shape():
+    out = pathway_to_composition("T", pathway_index=0)
+    assert out["target"]["name"] == "T"
+    assert out["step_count"] == len(out["enzymes"])
+    for e in out["enzymes"]:
+        assert {"step", "ecnum", "enzyme_name", "is_orphan", "is_p450",
+                "ec_class", "substrate_ids", "product_ids"} <= set(e)
+
+
+def test_pathway_to_composition_flags_p450_and_orphan_consistently():
+    # There are multiple pathways to T (via R7, and via R3→R4→R5+R6). One
+    # path hits R7 (EC 2.7.1.1 — hexokinase, not orphan) and another hits
+    # R6 (EC 1.14.13.1 — P450, deliberately absent from ec_names → orphan).
+    # Walk every pathway and confirm the per-step invariants hold.
+    for i in range(3):
+        try:
+            out = pathway_to_composition("T", pathway_index=i)
+        except ValueError:
+            break
+        for e in out["enzymes"]:
+            ec = e["ecnum"]
+            if ec.startswith("1.14."):
+                assert e["is_p450"] is True
+                assert e["is_orphan"] is True  # no entry in fixture's ec_names
+            else:
+                assert e["is_p450"] is False
+            if ec == "2.7.1.1":
+                assert e["is_orphan"] is False
+                assert e["enzyme_name"] == "hexokinase"
+                assert e["ec_class"] == "Transferase"
+
+
+def test_pathway_to_composition_out_of_range_raises():
+    with pytest.raises(ValueError, match="out of range"):
+        pathway_to_composition("T", pathway_index=9999)
+
+
+def test_pathway_to_composition_unreachable_raises():
+    with pytest.raises(ValueError, match="not reachable"):
+        pathway_to_composition("M7")
+
+
+# ---------------------------------------------------------------------------
+# compare_pathways  (multi-dim scorecard)
+# ---------------------------------------------------------------------------
+
+
+def test_compare_pathways_basic_shape():
+    out = compare_pathways("T", n=5)
+    assert out["target"]["name"] == "T"
+    assert isinstance(out["comparison"], list)
+    # Every row must carry the expected cofactor keys, even when 0.
+    expected_keys = {"NADPH", "NADH", "NADP+", "NAD+", "ATP", "CoA", "SAM"}
+    assert set(out["cofactor_keys"]) == expected_keys
+    for row in out["comparison"]:
+        assert set(row["cofactor_uses"]) == expected_keys
+
+
+def test_compare_pathways_sort_order():
+    # Rows are sorted by (step_count asc, n_p450 asc, n_orphan_steps asc).
+    out = compare_pathways("T", n=5)
+    rows = out["comparison"]
+    keys = [(r["step_count"], r["n_p450"], r["n_orphan_steps"]) for r in rows]
+    assert keys == sorted(keys)
+
+
+def test_compare_pathways_flags_p450_pathway():
+    # At least one of the T pathways includes R6 (EC 1.14.13.1). Find it
+    # and assert the P450 + orphan flags propagate up to the scorecard.
+    out = compare_pathways("T", n=5)
+    has_p450_row = any(r["n_p450"] >= 1 for r in out["comparison"])
+    assert has_p450_row, "expected at least one T pathway to hit R6 (EC 1.14.)"
+    has_orphan_row = any(r["n_orphan_steps"] >= 1 for r in out["comparison"])
+    assert has_orphan_row
+
+
+def test_compare_pathways_pathway_index_preserved():
+    # After sort, each row must still carry its ORIGINAL enumeration index
+    # so the LLM can drill down via pathway_to_composition(target, pidx).
+    out = compare_pathways("T", n=5)
+    indices = sorted(r["pathway_index"] for r in out["comparison"])
+    assert indices == list(range(len(indices)))
+    # Every original index is unique
+    assert len(indices) == len(set(indices))
+
+
+def test_compare_pathways_unreachable_raises():
+    with pytest.raises(ValueError, match="not reachable"):
+        compare_pathways("M7")

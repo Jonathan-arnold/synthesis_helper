@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from synthesis_helper.composition import AnnotatedEnzyme
 from synthesis_helper.models import Cascade, Chemical, HyperGraph, Pathway, Reaction
 
 
@@ -70,3 +71,42 @@ def pathway_to_dto(pathway: Pathway, index: int, hg: HyperGraph) -> dict[str, An
             key=lambda d: (d["shell"] if d["shell"] is not None else -1, d["id"]),
         ),
     }
+
+
+def annotated_enzyme_to_dto(ae: AnnotatedEnzyme) -> dict[str, Any]:
+    return {
+        "step": ae.step,
+        "ecnum": ae.ecnum,
+        "enzyme_name": ae.name,
+        "is_orphan": ae.is_orphan,
+        "is_p450": ae.is_p450,
+        "ec_class": ae.ec_class,
+        "substrate_ids": list(ae.substrate_ids),
+        "product_ids": list(ae.product_ids),
+    }
+
+
+def similarity_hit_to_dto(
+    chem: Chemical, tanimoto: float, hg: HyperGraph | None = None
+) -> dict[str, Any]:
+    """chemical_to_dto + the Tanimoto similarity score (rounded to 4 dp)."""
+    out = chemical_to_dto(chem, hg)
+    out["tanimoto"] = round(float(tanimoto), 4)
+    return out
+
+
+def pathway_comparison_row_to_dto(
+    pathway_index: int,
+    pathway: Pathway,
+    metrics: dict[str, Any],
+    hg: HyperGraph | None = None,
+) -> dict[str, Any]:
+    """One row in `compare_pathways`. *metrics* is produced by the tool itself
+    and merged into the row (step_count, unique_ecs, cofactor_uses, …)."""
+    row: dict[str, Any] = {
+        "pathway_index": pathway_index,
+        "target": chemical_to_dto(pathway.target, hg),
+        "step_count": len(pathway.reactions),
+    }
+    row.update(metrics)
+    return row

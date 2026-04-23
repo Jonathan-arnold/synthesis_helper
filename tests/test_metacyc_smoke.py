@@ -58,8 +58,8 @@ def test_corpus_load_counts(metacyc_hg):
     """
     chems, hg = metacyc_hg
     assert len(chems) == 9361
-    assert len(hg.chemical_to_shell) == 4303
-    assert len(hg.reaction_to_shell) == 12130
+    assert len(hg.chemical_to_shell) == 4310
+    assert len(hg.reaction_to_shell) == 12138
     assert max(hg.chemical_to_shell.values()) == 25
 
 

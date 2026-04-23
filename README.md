@@ -17,22 +17,24 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-**Optional — visualization tools.** `visualize_pathway`, `visualize_cascade`,
-and the two `open_*_externally` tools shell out to Graphviz's `dot` binary.
-Install it once:
-
-```bash
-brew install graphviz       # macOS
-# or: sudo apt install graphviz
-```
-
-The text tools work without Graphviz; only the PNG tools require it.
+> **macOS + iCloud note.** If this repo lives under `~/Documents` or `~/Desktop`
+> with iCloud "Optimize Mac Storage" on, `.venv/` files get evicted to cloud
+> stubs (`dataless` in `ls -laO`), and Python imports stall for minutes while
+> the MCP handshake is blocked. Put the venv **outside** any synced folder:
+>
+> ```bash
+> python3 -m venv ~/.venvs/synthesis_helper
+> ~/.venvs/synthesis_helper/bin/pip install -r requirements.txt
+> ```
+>
+> Then register using `scripts/start_mcp.sh` (see below), which also warms any
+> evicted project source via `brctl download` before launching.
 
 **Enzyme names on reaction nodes.** `data/ec_names.tsv` is shipped with a
 full EC → name table derived from [ExPASy ENZYME](https://enzyme.expasy.org/)
-(8k+ entries, transferred entries resolved to their new ECs). PNG diagrams
-use the enzyme name as the node title and the EC number as a small
-subtitle. To refresh the table:
+(8k+ entries, transferred entries resolved to their new ECs). The
+interactive viewer uses the enzyme name as the node title and the EC
+number as a small subtitle. To refresh the table:
 
 ```bash
 curl -sS https://ftp.expasy.org/databases/enzyme/enzyme.dat -o /tmp/enzyme.dat
@@ -46,18 +48,20 @@ Delete the file to fall back to EC-only labels.
 
 ### Register with Claude Code
 
-Project scope (this repo only):
+Preferred — launcher script (handles iCloud materialization and venv
+resolution automatically):
 
 ```bash
-claude mcp add synthesis-helper --scope project -- .venv/bin/python -m synthesis_helper
+claude mcp add synthesis-helper --scope user -- /absolute/path/to/synthesis_helper/scripts/start_mcp.sh
 ```
 
-User scope (available everywhere, but requires an absolute path to the venv):
+The launcher honors `SYNTHESIS_HELPER_VENV` if you keep the venv somewhere
+other than `~/.venvs/synthesis_helper`.
+
+Raw invocation (only safe when the venv is guaranteed to be outside iCloud):
 
 ```bash
-claude mcp add synthesis-helper \
-  --scope user \
-  -- /absolute/path/to/synthesis_helper/.venv/bin/python -m synthesis_helper
+claude mcp add synthesis-helper --scope user -- ~/.venvs/synthesis_helper/bin/python -m synthesis_helper
 ```
 
 Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: connected`.
@@ -72,22 +76,45 @@ Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: conn
 | `get_cascade(chemical_ref, max_producers_per_chemical)` | Full cascade (tree of reactions + leaf natives). |
 | `enumerate_pathways_for(chemical_ref, max_pathways, …)` | Individual linear pathways. |
 | `describe_pathway(chemical_ref, pathway_index)` | Markdown-rendered pathway. |
-| `visualize_pathway(chemical_ref, pathway_index)` | PNG of one pathway, inline in the tool result (small preview). Requires Graphviz. |
-| `visualize_cascade(chemical_ref, max_reactions)` | PNG of the full cascade tree, inline in the tool result. Requires Graphviz. |
-| `open_pathway_externally(chemical_ref, pathway_index)` | Render the pathway PNG and launch the OS default image viewer (Preview.app on macOS) for a full-size, zoomable view. Requires Graphviz. |
-| `open_cascade_externally(chemical_ref, max_reactions)` | Same as above for the full cascade. Requires Graphviz. |
+| `open_pathway_interactive(chemical_ref, pathway_index)` | Render an **interactive HTML page** (Cytoscape.js, offline) and open it in the default browser. Draggable nodes, 5 layout algorithms, group-by themes (shell / ec_class / role), cofactor toggle (inline / shared / hide), click-to-focus. Double-click any node to copy its info to the clipboard. |
+| `open_cascade_interactive(chemical_ref, max_reactions)` | Same as above for the full cascade, with themes {shell, ec_class, role, producer_depth}. |
 | `resynthesize_with_fed(fed_chemical_refs)` | Re-run BFS with additional fed chemicals; returns delta. |
 
-#### Inline vs. external PNGs
+#### Interactive HTML viewer
 
-- **Inline** (`visualize_*`) returns MCP `Image` content. Claude Desktop shows
-  a small thumbnail inside the collapsed tool result — handy as a quick
-  sanity check but hard to read for anything past a few reactions.
-- **External** (`open_*_externally`) writes the PNG to the OS temp directory
-  and launches the default image viewer. On macOS that is Preview.app
-  (`⌘+` / `⌘-` to zoom, scroll to pan), on Linux `xdg-open`, on Windows
-  `start`. The tool returns the file path plus an `opened_in_viewer` flag,
-  so even when the viewer fails to launch the saved PNG is still usable.
+`open_pathway_interactive` and `open_cascade_interactive` emit a
+**self-contained HTML file** (Cytoscape.js inlined — works offline) and
+launch it in the OS default browser. The page supports:
+
+- **5 layout algorithms** in the toolbar: Layered (shell-based preset),
+  Breadth-first, Concentric, Force (cose), Grid.
+- **Group-by themes** — independent from the layout. Pathway views offer
+  {shell, ec_class, role}; cascade views offer {shell, ec_class, role,
+  producer_depth}. Switching theme re-groups nodes into different
+  dashed-box containers, recolors them from the theme's palette, and
+  re-runs the active layout — all client-side, no server round-trip.
+- **Cofactor mode** — Inline (default) duplicates currency cofactors
+  (H2O, ATP, NAD(P)H, …) next to each reaction so no single node acts as
+  a hub; Shared reverts to the classical shared-node graph; Hide removes
+  cofactors entirely.
+- **Click-to-focus** — single-click any node to dim everything except
+  that node and its 1-hop neighborhood. Click empty space or press ESC
+  to clear.
+- **Drag** nodes around; hover for a full tooltip (name, InChI, substrates,
+  products).
+- **Double-click** any chemical or reaction node to copy its structured
+  details to the clipboard, formatted so it pastes cleanly back into a
+  Claude conversation ("Chemical #317157 …", "Reaction #42 — EC 1.1.1.1 …").
+
+**First-time setup** (only needed once per clone): download the inlined
+Cytoscape.js asset.
+
+```bash
+.venv/bin/python scripts/fetch_cytoscape.py
+```
+
+This writes `synthesis_helper/mcp/assets/cytoscape.min.js` (pinned
+version, SHA-256 verified). Cytoscape.js is MIT-licensed.
 
 ### Resources
 
@@ -107,8 +134,7 @@ Verify with `/mcp` inside Claude Code — you should see `synthesis-helper: conn
 - "List the top 3 pathways to 2′-dehydrokanamycin a." → `enumerate_pathways_for` + `describe_pathway`.
 - "If I feed PABA into the cell, how many more chemicals become reachable?" → `resynthesize_with_fed`.
 - "Give me a cascade summary for target 317157." → `get_cascade`.
-- "Draw the first pathway to target 317157." → `visualize_pathway` (inline PNG preview).
-- "Open the first pathway to target 317157 in Preview." → `open_pathway_externally` (full-size PNG in the OS viewer).
+- "Open an interactive pathway view for 317157." → `open_pathway_interactive` (Cytoscape.js in the browser; draggable nodes, group-by theme switcher, cofactor toggle, click-to-focus, double-click-to-copy).
 
 ## Run the standalone pipeline
 

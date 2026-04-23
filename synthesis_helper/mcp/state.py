@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from synthesis_helper.models import Chemical, HyperGraph, Reaction
 from synthesis_helper.parser import (
@@ -20,6 +22,37 @@ from synthesis_helper.synthesize import synthesize
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
+CURRENCY_DESCRIPTORS: set[str] = {"inorganics", "cofactor", "nucleotide"}
+
+# Canonical cofactor labels → alternative names to recognise. Order matters:
+# NADPH / NADH before NADP+ / NAD+ so reduced forms win when a stereoisomer
+# overlaps. Each chemical is assigned to the FIRST matching label only.
+#
+# Matching rule: `chem.name.lower()` EQUALS one of the alternatives, OR
+# starts with "<alt> (" for variant suffixes like "NAD+ (0)" or "SAM (27-)".
+# Substring matching is intentionally avoided: "atp" would false-positive on
+# "dATP" and "coa" would false-positive on "acetyl-coa".
+_COFACTOR_MATCHERS: list[tuple[str, frozenset[str]]] = [
+    ("NADPH", frozenset({"nadph", "beta-nadph"})),
+    ("NADH",  frozenset({"nadh", "beta-nadh"})),
+    ("NADP+", frozenset({"nadp+", "nadp", "nadp(+)"})),
+    ("NAD+",  frozenset({"nad+", "nad", "nad(+)"})),
+    ("ATP",   frozenset({"atp"})),
+    ("CoA",   frozenset({"coa", "coenzyme a", "coenzyme-a"})),
+    ("SAM",   frozenset({"sam", "s-adenosyl-l-methionine", "s-adenosylmethionine"})),
+]
+COFACTOR_KEYS: tuple[str, ...] = tuple(k for k, _ in _COFACTOR_MATCHERS)
+
+
+def _name_matches_cofactor(lname: str, alts: frozenset[str]) -> bool:
+    if lname in alts:
+        return True
+    for alt in alts:
+        if lname.startswith(alt + " ("):
+            return True
+    return False
+
+
 @dataclass
 class _State:
     data_dir: Path = DEFAULT_DATA_DIR
@@ -27,9 +60,14 @@ class _State:
     reactions: list[Reaction] | None = None
     natives: set[Chemical] | None = None
     universals: set[Chemical] | None = None
+    currency: set[Chemical] | None = None
     hypergraph: HyperGraph | None = None
     fed_hypergraphs: dict[tuple[int, ...], HyperGraph] = field(default_factory=dict)
     ec_names: dict[str, str] | None = None
+    named_cofactor_ids: dict[str, frozenset[int]] | None = None
+    fingerprint_index: list[tuple[int, object]] | None = None
+    fingerprint_build_ms: float = 0.0
+    fingerprint_skipped: int = 0
     load_time_ms: float = 0.0
 
 
@@ -53,9 +91,14 @@ def reset() -> None:
         _state.reactions = None
         _state.natives = None
         _state.universals = None
+        _state.currency = None
         _state.hypergraph = None
         _state.fed_hypergraphs.clear()
         _state.ec_names = None
+        _state.named_cofactor_ids = None
+        _state.fingerprint_index = None
+        _state.fingerprint_build_ms = 0.0
+        _state.fingerprint_skipped = 0
         _state.load_time_ms = 0.0
 
 
@@ -93,6 +136,11 @@ def _bootstrap() -> None:
     universals = parse_metabolite_list(
         data / "ubiquitous_metabolites.txt", chemicals
     )
+    currency = parse_metabolite_list(
+        data / "ubiquitous_metabolites.txt",
+        chemicals,
+        descriptor_filter=CURRENCY_DESCRIPTORS,
+    )
 
     hg = synthesize(reactions, natives, universals, verbose=False)
 
@@ -100,6 +148,7 @@ def _bootstrap() -> None:
     _state.reactions = reactions
     _state.natives = natives
     _state.universals = universals
+    _state.currency = currency
     _state.hypergraph = hg
     _state.ec_names = _parse_ec_names(data / "ec_names.tsv")
     _state.load_time_ms = (time.perf_counter() - t0) * 1000.0
@@ -145,6 +194,87 @@ def get_universals() -> set[Chemical]:
         return _state.universals
 
 
+def get_currency_chemicals() -> set[Chemical]:
+    """Return the subset of ubiquitous metabolites classified as currency
+    (inorganics, cofactors, nucleotides) — the "hub" chemicals that tend to
+    connect to most reactions and clutter visualizations.
+    """
+    with _lock:
+        if _state.currency is None:
+            _bootstrap()
+        assert _state.currency is not None
+        return _state.currency
+
+
+def get_fingerprint_index() -> list[tuple[int, object]]:
+    """Lazy-built Morgan-fingerprint index over the chemical corpus.
+
+    First call imports RDKit and fingerprints every chemical (~3–5 s for
+    9361 mols). Subsequent calls return the cached list in-process. This
+    is intentionally outside of ``_bootstrap()`` so baseline MCP startup
+    never pays the RDKit cost — only users of ``find_by_structure`` do.
+
+    Each chemical is attempted as SMILES first, then InChI. Failures are
+    silently skipped and counted in ``_state.fingerprint_skipped``.
+    """
+    with _lock:
+        if _state.fingerprint_index is None:
+            if _state.chemicals is None:
+                _bootstrap()
+            assert _state.chemicals is not None
+            # Local import keeps RDKit out of the hot-path startup.
+            from synthesis_helper.mcp import similarity
+
+            index, elapsed_ms, skipped = similarity.build_index(
+                _state.chemicals.values()
+            )
+            _state.fingerprint_index = index
+            _state.fingerprint_build_ms = elapsed_ms
+            _state.fingerprint_skipped = skipped
+            print(
+                f"[synthesis_helper] fingerprint index built: "
+                f"{len(index)}/{len(_state.chemicals)} chemicals "
+                f"({skipped} skipped) in {elapsed_ms:.0f} ms",
+                file=sys.stderr,
+            )
+        return _state.fingerprint_index
+
+
+def get_named_cofactor_ids() -> dict[str, frozenset[int]]:
+    """Canonical cofactor label → ids of chems whose name matches.
+
+    Keys: ``NADPH``, ``NADH``, ``NADP+``, ``NAD+``, ``ATP``, ``CoA``, ``SAM``.
+    Each chemical is assigned to the FIRST matching label only (no double
+    counting — NADPH is matched before NADP+ because "nadp" is a substring
+    of "nadph"). Every key is always present in the returned dict, even if
+    empty, so downstream callers can iterate keys safely without KeyError.
+
+    Source pool: ``get_currency_chemicals()``. MetaCyc stores multiple
+    ionisation/stereo variants of the same cofactor (NAD+ (0), NAD+ (p+1),
+    SAM (27-), SAM (27+) …) so we use substring matching to pull them all
+    under one canonical label.
+    """
+    with _lock:
+        if _state.named_cofactor_ids is None:
+            if _state.currency is None:
+                _bootstrap()
+            assert _state.currency is not None
+            assigned: set[int] = set()
+            buckets: dict[str, set[int]] = {key: set() for key, _ in _COFACTOR_MATCHERS}
+            for chem in _state.currency:
+                lname = (chem.name or "").lower()
+                if not lname:
+                    continue
+                for label, alts in _COFACTOR_MATCHERS:
+                    if _name_matches_cofactor(lname, alts):
+                        if chem.id not in assigned:
+                            buckets[label].add(chem.id)
+                            assigned.add(chem.id)
+                        break
+            _state.named_cofactor_ids = {k: frozenset(v) for k, v in buckets.items()}
+        return _state.named_cofactor_ids
+
+
 def get_ec_names() -> dict[str, str]:
     """Return EC → enzyme-name lookup. Empty dict if data/ec_names.tsv absent."""
     with _lock:
@@ -154,10 +284,10 @@ def get_ec_names() -> dict[str, str]:
         return _state.ec_names
 
 
-def get_stats() -> dict[str, float | int]:
+def get_stats() -> dict[str, Any]:
     hg = get_hypergraph()
     shells = max(hg.reaction_to_shell.values(), default=0)
-    return {
+    out: dict[str, Any] = {
         "shells": shells,
         "total_chemicals": len(_state.chemicals or {}),
         "reachable_chemicals": len(hg.chemical_to_shell),
@@ -166,6 +296,19 @@ def get_stats() -> dict[str, float | int]:
         "load_time_ms": round(_state.load_time_ms, 1),
         "data_dir": str(_state.data_dir),
     }
+    # Only surface fingerprint stats if the index has actually been built
+    # (i.e. find_by_structure has been called at least once in this process).
+    if _state.fingerprint_index is not None:
+        indexed = len(_state.fingerprint_index)
+        total = len(_state.chemicals or {})
+        out["fingerprint_coverage"] = {
+            "indexed": indexed,
+            "total": total,
+            "skipped": _state.fingerprint_skipped,
+            "build_ms": round(_state.fingerprint_build_ms, 1),
+            "fraction": round(indexed / total, 4) if total else 0.0,
+        }
+    return out
 
 
 def get_or_build_fed_hypergraph(fed_ids: tuple[int, ...]) -> HyperGraph:

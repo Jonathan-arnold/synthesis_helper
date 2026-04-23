@@ -11,19 +11,22 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.utilities.types import Image
 
+from synthesis_helper.composition import annotate_pathway
 from synthesis_helper.models import Chemical
 from synthesis_helper.pathways import enumerate_pathways
 from synthesis_helper.traceback import traceback as build_cascade
 from synthesis_helper.mcp import lookup, state
 from synthesis_helper.mcp.serializers import (
+    annotated_enzyme_to_dto,
     cascade_to_dto,
     chemical_to_dto,
+    pathway_comparison_row_to_dto,
     pathway_to_dto,
     reaction_to_dto,
+    similarity_hit_to_dto,
 )
-from synthesis_helper.mcp.visualize import render_cascade_png, render_pathway_png
+from synthesis_helper.mcp.html_render import render_cascade_html, render_pathway_html
 
 
 mcp = FastMCP("synthesis-helper")
@@ -59,6 +62,40 @@ def find_chemical(query: str, limit: int = 10) -> list[dict[str, Any]]:
     chems = state.get_chemicals()
     hits = lookup.resolve(query, chems, limit=limit)
     return [chemical_to_dto(c, hg) for c in hits]
+
+
+@mcp.tool()
+def find_by_structure(
+    smiles: str,
+    limit: int = 10,
+    similarity_threshold: float = 0.4,
+) -> list[dict[str, Any]]:
+    """**Look up chemicals by structural similarity (SMILES input).**
+    Call this whenever the user gives you a SMILES string, a drawn structure,
+    or asks "find chemicals like this" / "what is this molecule in MetaCyc".
+    Use instead of ``find_chemical`` when the query is a structure rather
+    than a name, id, or InChI — ``find_chemical`` cannot match by shape.
+
+    Returns top-N chemicals ranked by Tanimoto similarity on Morgan
+    fingerprints (radius 2, 2048 bits). Each hit carries the usual chemical
+    fields (id, name, inchi, smiles, shell) plus a ``tanimoto`` score in
+    ``[0.0, 1.0]``. Hits below ``similarity_threshold`` are dropped; if
+    fewer than ``limit`` hits pass, returns fewer (never an error).
+
+    Raises ``ValueError`` on invalid SMILES.
+
+    Note: the first call in a process builds a corpus-wide fingerprint index
+    (~3-5 s for 9k chemicals); subsequent calls are fast. Coverage is close
+    to 100% because chemicals without SMILES fall back to InChI parsing.
+    """
+    from synthesis_helper.mcp import similarity
+
+    query_fp = similarity.fingerprint_from_smiles(smiles)
+    index = state.get_fingerprint_index()
+    chems = state.get_chemicals()
+    hg = state.get_hypergraph()
+    hits = similarity.tanimoto_search(query_fp, index, similarity_threshold, limit)
+    return [similarity_hit_to_dto(chems[cid], score, hg) for cid, score in hits if cid in chems]
 
 
 @mcp.tool()
@@ -191,16 +228,32 @@ def describe_pathway(
 
 
 @mcp.tool()
-def visualize_pathway(
+def pathway_to_composition(
     chemical_ref: str | int,
     pathway_index: int = 0,
     max_producers_per_chemical: int = 5,
-) -> Image:
-    """Render one pathway to a PNG for inline display in Claude Desktop.
+) -> dict[str, Any]:
+    """**Machine-readable enzyme list for ONE pathway, with engineering flags.**
+    Call this whenever the user asks for the enzyme list, composition, "which
+    enzymes / which genes to express", or any per-step enzyme detail for a
+    single pathway. Use instead of ``describe_pathway`` when the user wants
+    structured data (for filtering, ranking, copying into a gene order) rather
+    than a Markdown narrative.
 
-    Bipartite layered diagram: chemicals (ellipses, green=native, salmon=target)
-    and reactions (yellow boxes), laid out top-down with `dot`. Requires the
-    `graphviz` Python package + system binary (brew/apt install graphviz).
+    Returns ordered per-step rows: ``{step, ecnum, enzyme_name, is_orphan,
+    is_p450, ec_class, substrate_ids, product_ids}``.
+
+    - ``is_orphan``: the reaction has no EC number OR the EC is missing from
+      the EC → enzyme name table. These steps need curation before cloning.
+    - ``is_p450``: EC starts with ``1.14.`` — cytochrome P450 / oxygenase
+      family. Notoriously hard to express in *E. coli* (needs electron
+      partners, often membrane-bound). Useful flag for "please give me a
+      pathway without any P450s".
+    - ``ec_class``: Oxidoreductase / Transferase / … / Unknown.
+
+    Use ``compare_pathways`` first when the user wants to pick *which*
+    pathway to compose; use this tool for the chosen one. Raises
+    ``ValueError`` if ``pathway_index`` is out of range.
     """
     hg = state.get_hypergraph()
     chem = _resolve_or_raise(chemical_ref)
@@ -214,21 +267,48 @@ def visualize_pathway(
         raise ValueError(
             f"Only {len(pathways)} pathway(s) found; index {pathway_index} out of range."
         )
-    png = render_pathway_png(pathways[pathway_index], hg, state.get_ec_names())
-    return Image(data=png, format="png")
+    pathway = pathways[pathway_index]
+    enzymes = annotate_pathway(pathway, state.get_ec_names())
+    return {
+        "target": chemical_to_dto(chem, hg),
+        "pathway_index": pathway_index,
+        "step_count": len(enzymes),
+        "enzymes": [annotated_enzyme_to_dto(e) for e in enzymes],
+    }
 
 
 @mcp.tool()
-def visualize_cascade(
+def compare_pathways(
     chemical_ref: str | int,
+    n: int = 5,
     max_producers_per_chemical: int = 5,
-    max_reactions: int = 80,
-) -> Image:
-    """Render the full cascade (all producer reactions) as a PNG.
+) -> dict[str, Any]:
+    """**Multi-dimensional scorecard across up to N pathways to one target.**
+    Call this whenever the user asks to compare, rank, triage, or pick between
+    pathways — "which pathway is most feasible", "avoid P450s", "simplest
+    route". Use instead of calling ``pathway_to_composition`` N times.
 
-    Same visual scheme as `visualize_pathway`. Raises if the cascade has more
-    than *max_reactions* reactions — large cascades produce illegible images;
-    lower *max_producers_per_chemical* first.
+    Returns a dict with a ``comparison`` list, sorted by
+    ``(step_count, n_p450, n_orphan_steps)`` so row 0 is the first-pass
+    most-viable candidate. Each row carries:
+
+    - ``pathway_index`` — the original enumeration index (hand back to
+      ``pathway_to_composition``, ``describe_pathway``, or
+      ``open_pathway_interactive`` for drill-down)
+    - ``step_count``
+    - ``unique_ecs`` (set of EC strings), ``unique_ec_classes`` (EC-class
+      diversity — higher usually means a more varied cascade)
+    - ``n_orphan_steps`` (reactions with no / unmapped EC)
+    - ``n_p450`` (EC starts with ``1.14.``)
+    - ``cofactor_uses`` — dict keyed by ATP / NADH / NADPH / NAD+ / NADP+ /
+      CoA / SAM; value = reaction count consuming or producing that cofactor
+      in this pathway (stoichiometry-agnostic: one reaction → one count).
+    - ``redox_hint`` — crude net NAD(P)H balance: positive → pathway tends
+      to reduce cofactors (substrate side); negative → tends to regenerate
+      them. Stoichiometry-agnostic, treat as directional signal only.
+
+    ``cofactor_keys`` at the top level lists every key present in each row's
+    ``cofactor_uses`` dict so callers can build tabular views reliably.
     """
     hg = state.get_hypergraph()
     chem = _resolve_or_raise(chemical_ref)
@@ -236,15 +316,61 @@ def visualize_cascade(
         raise ValueError(
             f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
         )
+    cap = max(1, min(n, _MAX_PATHWAYS_CAP))
     cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
-    png = render_cascade_png(
-        cascade, hg, max_reactions=max_reactions, ec_to_name=state.get_ec_names()
-    )
-    return Image(data=png, format="png")
+    pathways = enumerate_pathways(cascade, hg, max_pathways=cap)
+
+    ec_names = state.get_ec_names()
+    cofactor_ids = state.get_named_cofactor_ids()
+    nadh_like = cofactor_ids["NADH"] | cofactor_ids["NADPH"]
+
+    def _metrics_for(pw) -> dict[str, Any]:
+        ecs = {r.ecnum for r in pw.reactions if r.ecnum}
+        ec_classes = {r.ecnum.split(".", 1)[0] for r in pw.reactions
+                      if r.ecnum and r.ecnum[:1].isdigit()}
+        n_orphan = sum(1 for r in pw.reactions if (not r.ecnum) or r.ecnum not in ec_names)
+        n_p450 = sum(1 for r in pw.reactions if r.ecnum.startswith("1.14."))
+        cofactor_uses: dict[str, int] = {key: 0 for key in state.COFACTOR_KEYS}
+        redox = 0
+        for rxn in pw.reactions:
+            sub_ids = {s.id for s in rxn.substrates}
+            prod_ids = {p.id for p in rxn.products}
+            touching = sub_ids | prod_ids
+            for key in state.COFACTOR_KEYS:
+                if touching & cofactor_ids[key]:
+                    cofactor_uses[key] += 1
+            # Net NAD(P)H direction: +1 if consumed as substrate, -1 if
+            # regenerated as product. Rough — ignores stoichiometry.
+            if sub_ids & nadh_like:
+                redox += 1
+            if prod_ids & nadh_like:
+                redox -= 1
+        return {
+            "unique_ecs": sorted(ecs),
+            "unique_ec_classes": sorted(ec_classes),
+            "n_orphan_steps": n_orphan,
+            "n_p450": n_p450,
+            "cofactor_uses": cofactor_uses,
+            "redox_hint": redox,
+        }
+
+    rows: list[tuple[int, Any, dict[str, Any]]] = [
+        (i, pw, _metrics_for(pw)) for i, pw in enumerate(pathways)
+    ]
+    rows.sort(key=lambda t: (len(t[1].reactions), t[2]["n_p450"], t[2]["n_orphan_steps"]))
+    comparison = [
+        pathway_comparison_row_to_dto(i, pw, metrics, hg) for (i, pw, metrics) in rows
+    ]
+    return {
+        "target": chemical_to_dto(chem, hg),
+        "n_pathways_considered": len(pathways),
+        "cofactor_keys": list(state.COFACTOR_KEYS),
+        "comparison": comparison,
+    }
 
 
 # -----------------------------------------------------------------------------
-# Externally-opened viewers (full-size PNG in the OS image viewer)
+# Interactive HTML viewer helpers
 # -----------------------------------------------------------------------------
 
 
@@ -273,26 +399,97 @@ def _open_in_viewer(path: Path) -> tuple[bool, str | None]:
         return False, str(e)
 
 
-def _write_png(prefix: str, data: bytes) -> Path:
-    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".png", dir=tempfile.gettempdir())
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
+def _write_html(prefix: str, html: str) -> Path:
+    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".html", dir=tempfile.gettempdir())
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(html)
     return Path(tmp)
 
 
+_DO_NOT_VERIFY = (
+    "The HTML file and browser tab are on the user's local machine, which is "
+    "NOT visible to Bash / Read tools in your sandbox — do not attempt to "
+    "verify. Do NOT re-call this tool for the same request; every call "
+    "opens another browser tab."
+)
+
+
+def _viewer_result(
+    *,
+    path: Path,
+    opened: bool,
+    viewer_error: str | None,
+    html_bytes: int,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a consistent return shape for the interactive-viewer tools.
+
+    ``status`` + ``message`` lead the dict so the LLM has an unambiguous
+    success/failure signal before scanning the rest of the payload — this
+    prevents the "retry to verify" loop that causes duplicate browser tabs.
+    """
+    if opened:
+        status = "opened"
+        message = (
+            f"Pathway viewer launched in the user's default browser "
+            f"(file: {path}). {_DO_NOT_VERIFY}"
+        )
+    else:
+        status = "write_only"
+        message = (
+            f"HTML written to {path} but the system viewer failed to launch: "
+            f"{viewer_error}. The file is on the user's machine; they can "
+            f"open it manually. Do not re-call this tool automatically."
+        )
+    result: dict[str, Any] = {
+        "status": status,
+        "message": message,
+        "path": str(path),
+        "opened_in_viewer": opened,
+        "viewer_error": viewer_error,
+        "html_bytes": html_bytes,
+    }
+    result.update(extra)
+    return result
+
+
 @mcp.tool()
-def open_pathway_externally(
+def open_pathway_interactive(
     chemical_ref: str | int,
     pathway_index: int = 0,
     max_producers_per_chemical: int = 5,
 ) -> dict[str, Any]:
-    """Render a pathway PNG and open it in the OS default image viewer.
+    """**THE visualization tool for a single pathway.** Call this whenever the
+    user asks to see, draw, view, graph, diagram, or visualize one pathway to
+    a target chemical — there is no PNG / text-graph alternative; this is it.
 
-    Writes the PNG to a temp file and launches the system viewer (Preview.app
-    on macOS, xdg-open on Linux, start on Windows). This gives a full-size,
-    zoomable view instead of the small inline preview embedded in tool results.
-    Returns the file path, open-status, and a short summary so the model can
-    describe what was opened.
+    **SIDE EFFECT — READ BEFORE CALLING TWICE:** This tool WRITES an HTML
+    file to the user's local ``/tmp`` and LAUNCHES their default browser,
+    opening a new tab. Both actions happen on the user's machine (where
+    the MCP server runs), NOT in the sandbox where your Bash / Read tools
+    operate. The file path in the return value CANNOT be verified with
+    Bash or Read — any such attempt will fail even though the tool
+    succeeded. **Trust ``status == "opened"`` and do not re-call the tool
+    to "check" or retry — every call opens a new browser tab.**
+
+    Renders pathway #``pathway_index`` (0 = shortest / first enumerated) as a
+    self-contained interactive HTML page (Cytoscape.js inlined, works offline)
+    and launches the user's default browser. The page gives the user:
+
+    - 5 layout algorithms (Layered / Breadth-first / Concentric / Force / Grid)
+    - Group-by themes: shell, ec_class, role
+    - Cofactor mode toggle (Inline / Shared / Hide) — defaults to Inline,
+      which duplicates H2O / NAD(P)H / ATP / … next to each reaction so the
+      carbon backbone stands out instead of a hairball of cofactor edges
+    - Click any node to dim everything except its 1-hop neighborhood (ESC or
+      background-click clears)
+    - Double-click any node to copy its structured details to the clipboard
+      for pasting back into Claude
+
+    Returns a dict with ``status``, ``message``, the file path, step count,
+    etc. Use ``open_cascade_interactive`` instead when the user wants the
+    *full tree* of ways to make the target (branching producer graph), not
+    a single linear pathway.
     """
     hg = state.get_hypergraph()
     chem = _resolve_or_raise(chemical_ref)
@@ -306,33 +503,67 @@ def open_pathway_externally(
         raise ValueError(
             f"Only {len(pathways)} pathway(s) found; index {pathway_index} out of range."
         )
-    png = render_pathway_png(pathways[pathway_index], hg, state.get_ec_names())
-
-    path = _write_png(f"pathway_{_slug(chem.name or f'chem{chem.id}')}_{pathway_index}_", png)
-    opened, err = _open_in_viewer(path)
-    return {
-        "path": str(path),
-        "opened_in_viewer": opened,
-        "viewer_error": err,
-        "chemical": chem.name,
-        "chemical_id": chem.id,
-        "pathway_index": pathway_index,
-        "steps": len(pathways[pathway_index].reactions),
-        "bytes": len(png),
+    chem_id_to_name = {
+        c.id: (c.name if c.name and c.name != "undefined" else f"#{c.id}")
+        for c in state.get_chemicals().values()
     }
+    html = render_pathway_html(
+        pathways[pathway_index], hg, state.get_ec_names(),
+        chem_id_to_name=chem_id_to_name,
+        currency_chemicals=state.get_currency_chemicals(),
+    )
+    path = _write_html(
+        f"pathway_{_slug(chem.name or f'chem{chem.id}')}_{pathway_index}_", html
+    )
+    opened, err = _open_in_viewer(path)
+    return _viewer_result(
+        path=path,
+        opened=opened,
+        viewer_error=err,
+        html_bytes=len(html),
+        extra={
+            "chemical": chem.name,
+            "chemical_id": chem.id,
+            "pathway_index": pathway_index,
+            "steps": len(pathways[pathway_index].reactions),
+        },
+    )
 
 
 @mcp.tool()
-def open_cascade_externally(
+def open_cascade_interactive(
     chemical_ref: str | int,
     max_producers_per_chemical: int = 5,
-    max_reactions: int = 80,
+    max_reactions: int = 200,
 ) -> dict[str, Any]:
-    """Render the full cascade PNG and open it in the OS default image viewer.
+    """**THE visualization tool for a full cascade / producer tree.** Call this
+    whenever the user asks to see, draw, view, graph, diagram, or visualize
+    *all* the ways to synthesize a target (not one linear route) — there is
+    no PNG / text-graph alternative; this is it.
 
-    Same as ``open_pathway_externally`` but for the entire cascade tree. For
-    large cascades, lower ``max_producers_per_chemical`` or raise
-    ``max_reactions`` (the latter trades readability for completeness).
+    **SIDE EFFECT — READ BEFORE CALLING TWICE:** This tool WRITES an HTML
+    file to the user's local ``/tmp`` and LAUNCHES their default browser,
+    opening a new tab. Both actions happen on the user's machine (where
+    the MCP server runs), NOT in the sandbox where your Bash / Read tools
+    operate. The file path in the return value CANNOT be verified with
+    Bash or Read — any such attempt will fail even though the tool
+    succeeded. **Trust ``status == "opened"`` and do not re-call the tool
+    to "check" or retry — every call opens a new browser tab.**
+
+    Renders the complete cascade (every reaction that can produce the target,
+    recursively back to native metabolites) as a self-contained interactive
+    HTML page (Cytoscape.js inlined, works offline) and launches the user's
+    default browser. Same page interactions as ``open_pathway_interactive``
+    (layouts, cofactor toggle, click-to-focus, double-click-to-copy); the
+    group-by themes are {shell, ec_class, role, producer_depth}.
+
+    Large cascades can be unwieldy — if the target has many producer
+    reactions, lower ``max_producers_per_chemical`` first. ``max_reactions``
+    is a safety ceiling (default 200); the call raises if the cascade
+    exceeds it so the browser doesn't choke on a thousand-node graph.
+
+    Use ``open_pathway_interactive`` instead when the user wants one specific
+    linear pathway to the target.
     """
     hg = state.get_hypergraph()
     chem = _resolve_or_raise(chemical_ref)
@@ -341,21 +572,28 @@ def open_cascade_externally(
             f"{chem.name!r} (id={chem.id}) is not reachable from the baseline cell."
         )
     cascade = build_cascade(hg, chem, max_producers_per_chemical=max_producers_per_chemical)
-    png = render_cascade_png(
-        cascade, hg, max_reactions=max_reactions, ec_to_name=state.get_ec_names()
-    )
-
-    path = _write_png(f"cascade_{_slug(chem.name or f'chem{chem.id}')}_", png)
-    opened, err = _open_in_viewer(path)
-    return {
-        "path": str(path),
-        "opened_in_viewer": opened,
-        "viewer_error": err,
-        "chemical": chem.name,
-        "chemical_id": chem.id,
-        "reactions": len(cascade.reactions),
-        "bytes": len(png),
+    chem_id_to_name = {
+        c.id: (c.name if c.name and c.name != "undefined" else f"#{c.id}")
+        for c in state.get_chemicals().values()
     }
+    html = render_cascade_html(
+        cascade, hg, state.get_ec_names(),
+        max_reactions=max_reactions, chem_id_to_name=chem_id_to_name,
+        currency_chemicals=state.get_currency_chemicals(),
+    )
+    path = _write_html(f"cascade_{_slug(chem.name or f'chem{chem.id}')}_", html)
+    opened, err = _open_in_viewer(path)
+    return _viewer_result(
+        path=path,
+        opened=opened,
+        viewer_error=err,
+        html_bytes=len(html),
+        extra={
+            "chemical": chem.name,
+            "chemical_id": chem.id,
+            "reactions": len(cascade.reactions),
+        },
+    )
 
 
 @mcp.tool()

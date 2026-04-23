@@ -18,8 +18,22 @@ from pathlib import Path
 from synthesis_helper.models import Chemical, Reaction
 
 
-def _chem(id_: int, name: str) -> Chemical:
-    return Chemical(id=id_, name=name, inchi=f"InChI=1S/SMALL_CELL/{name}")
+def _chem(
+    id_: int,
+    name: str,
+    smiles: str = "",
+    inchi: str | None = None,
+) -> Chemical:
+    """Build a test Chemical. By default uses a synthetic InChI that RDKit
+    won't parse (``InChI=1S/SMALL_CELL/<name>``); pass a real ``inchi`` /
+    ``smiles`` when a test needs RDKit to actually fingerprint the chem.
+    """
+    return Chemical(
+        id=id_,
+        name=name,
+        inchi=inchi if inchi is not None else f"InChI=1S/SMALL_CELL/{name}",
+        smiles=smiles,
+    )
 
 
 @dataclass
@@ -36,12 +50,19 @@ class SmallCell:
 
 
 def build_small_cell() -> SmallCell:
-    N1 = _chem(101, "N1")
+    # A few chems carry REAL SMILES / InChI so RDKit-based tools
+    # (find_by_structure) can fingerprint them. Ethanol / acetaldehyde /
+    # acetate form a structurally related triplet so Tanimoto scoring is
+    # meaningful. The others keep the synthetic ``InChI=1S/SMALL_CELL/...``
+    # which RDKit rejects — intentional, exercises the skip-on-parse-fail
+    # path without needing a pristine 15-molecule dataset.
+    N1 = _chem(101, "N1", smiles="CCO",
+               inchi="InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3")  # ethanol
     N2 = _chem(102, "N2")
     U1 = _chem(103, "U1")
     F1 = _chem(104, "F1")
-    M1 = _chem(201, "M1")
-    M2 = _chem(202, "M2")
+    M1 = _chem(201, "M1", smiles="CC=O")     # acetaldehyde
+    M2 = _chem(202, "M2", smiles="CC(=O)O")  # acetic acid
     M_deep = _chem(203, "M_deep")
     M4 = _chem(204, "M4")
     M5 = _chem(205, "M5")
@@ -57,6 +78,14 @@ def build_small_cell() -> SmallCell:
         for c in [N1, N2, U1, F1, M1, M2, M_deep, M4, M5, M3a, M3b, M6, M7, T, X_missing]
     }
 
+    # Real ECs on three reactions so compare_pathways / pathway_to_composition
+    # have signal to test against:
+    #   R6 = 1.14.13.1  (cytochrome P450 monooxygenase — triggers is_p450)
+    #   R7 = 2.7.1.1    (hexokinase — has entry in ec_names → NOT orphan)
+    #   R9 = 1.1.1.1    (alcohol dehydrogenase — has entry in ec_names)
+    # R9 is off the main T pathway (feeds M3b), so the T pathway containing
+    # R7 is the "no-orphan" path and the T pathway containing R6+R5 is
+    # "orphan" — ideal for sort-order tests.
     rxns = {
         "R1": Reaction(id=1, substrates=frozenset([N1]), products=frozenset([M1])),
         "R2": Reaction(id=2, substrates=frozenset([M1]), products=frozenset([M2])),
@@ -64,10 +93,13 @@ def build_small_cell() -> SmallCell:
         "R3": Reaction(id=4, substrates=frozenset([N1, N2]), products=frozenset([M4])),
         "R4": Reaction(id=5, substrates=frozenset([M4, U1]), products=frozenset([M5])),
         "R5": Reaction(id=6, substrates=frozenset([N2]), products=frozenset([M3a])),
-        "R6": Reaction(id=7, substrates=frozenset([M5, M3a]), products=frozenset([T])),
-        "R7": Reaction(id=8, substrates=frozenset([N2]), products=frozenset([T])),
+        "R6": Reaction(id=7, substrates=frozenset([M5, M3a]), products=frozenset([T]),
+                       ecnum="1.14.13.1"),
+        "R7": Reaction(id=8, substrates=frozenset([N2]), products=frozenset([T]),
+                       ecnum="2.7.1.1"),
         "R8": Reaction(id=9, substrates=frozenset([N1]), products=frozenset([M3b])),
-        "R9": Reaction(id=10, substrates=frozenset([M1]), products=frozenset([M3b])),
+        "R9": Reaction(id=10, substrates=frozenset([M1]), products=frozenset([M3b]),
+                       ecnum="1.1.1.1"),
         "R10": Reaction(id=11, substrates=frozenset([F1]), products=frozenset([M6])),
         "R11": Reaction(id=12, substrates=frozenset([X_missing]), products=frozenset([M7])),
     }
@@ -109,3 +141,13 @@ def write_small_cell_tsvs(sc: SmallCell, out_dir: Path) -> None:
     for c in sc.universals:
         univ_lines.append(f"{c.name}\t{c.inchi}\tcofactor")
     (out_dir / "ubiquitous_metabolites.txt").write_text("\n".join(univ_lines) + "\n")
+
+    # ec_names.tsv — map only a subset of the fixture's ECs so tests can
+    # cover both named-enzyme and orphan-EC branches. R6's 1.14.13.1 is
+    # intentionally OMITTED → becomes an orphan P450 step.
+    ec_lines = [
+        "ecnum\tname",
+        "2.7.1.1\thexokinase",
+        "1.1.1.1\talcohol dehydrogenase",
+    ]
+    (out_dir / "ec_names.tsv").write_text("\n".join(ec_lines) + "\n")
