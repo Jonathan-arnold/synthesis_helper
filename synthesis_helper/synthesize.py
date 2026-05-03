@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from synthesis_helper.models import Chemical, HyperGraph, Reaction
 
 
@@ -54,7 +56,8 @@ def synthesize(
                 f"Shell {shell}: +{len(new_reactions)} reactions, "
                 f"+{len(new_chemicals)} chemicals "
                 f"(total: {len(hg.reaction_to_shell)} rxns, "
-                f"{len(hg.chemical_to_shell)} chems)"
+                f"{len(hg.chemical_to_shell)} chems)",
+                file=sys.stderr,
             )
 
         shell += 1
@@ -63,7 +66,8 @@ def synthesize(
         print(
             f"Expansion complete: {len(hg.chemical_to_shell)} reachable chemicals, "
             f"{len(hg.reaction_to_shell)} enabled reactions, "
-            f"{shell - 1} shells."
+            f"{shell - 1} shells.",
+            file=sys.stderr,
         )
 
     return hg

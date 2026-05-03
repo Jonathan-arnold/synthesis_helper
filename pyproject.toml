@@ -1,0 +1,19 @@
+[project]
+name = "synthesis-helper"
+version = "0.1.0"
+description = "Bottom-up retrobiosynthesis / pathway synthesis tool (BioE234)."
+requires-python = ">=3.11"
+dependencies = [
+    "gdown>=5.0",
+    "pandas>=2.0",
+    "rdkit>=2023.9",
+    "mcp>=1.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.uv]
+package = false

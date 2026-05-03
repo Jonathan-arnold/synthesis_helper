@@ -115,6 +115,19 @@ def enumerate_pathways(cascade: Cascade) -> list[Pathway]: ...
 def pathway_to_composition(pathway: Pathway, enzyme_map: dict) -> list[Enzyme]: ...
 ```
 
+## MCP surface (`synthesis_helper.mcp`)
+
+The `synthesis_helper.mcp` subpackage wraps the API above as a FastMCP server
+(stdio transport) so Claude Code can call it directly. The baseline
+hypergraph is lazy-loaded and cached in-process; see `README.md` for registration.
+
+| Entry point | Exposed |
+|---|---|
+| Tools | `find_chemical`, `get_shell`, `list_reachables`, `get_cascade`, `enumerate_pathways_for`, `describe_pathway`, `open_pathway_interactive`, `open_cascade_interactive`, `resynthesize_with_fed` |
+| Resources | `synthesis://stats`, `synthesis://reachables`, `synthesis://chemical/{id}`, `synthesis://reaction/{id}` |
+
+Run locally: `python -m synthesis_helper`. Env: `SYNTHESIS_DATA_DIR`, `SYNTHESIS_MAX_PATHWAYS`.
+
 ## Example Query
 
 > "What is the minimum number of reaction steps to convert native E. coli metabolites to 2′-dehydrokanamycin a?"
