@@ -123,7 +123,7 @@ hypergraph is lazy-loaded and cached in-process; see `README.md` for registratio
 
 | Entry point | Exposed |
 |---|---|
-| Tools | `find_chemical`, `get_shell`, `list_reachables`, `get_cascade`, `enumerate_pathways_for`, `describe_pathway`, `resynthesize_with_fed` |
+| Tools | `find_chemical`, `get_shell`, `list_reachables`, `get_cascade`, `enumerate_pathways_for`, `describe_pathway`, `open_pathway_interactive`, `open_cascade_interactive`, `resynthesize_with_fed` |
 | Resources | `synthesis://stats`, `synthesis://reachables`, `synthesis://chemical/{id}`, `synthesis://reaction/{id}` |
 
 Run locally: `python -m synthesis_helper`. Env: `SYNTHESIS_DATA_DIR`, `SYNTHESIS_MAX_PATHWAYS`.
